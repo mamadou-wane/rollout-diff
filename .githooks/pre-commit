@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+export PYTHONDONTWRITEBYTECODE=1
+
+python=.venv/bin/python
+[ -x "$python" ] || python=python3
+if ! "$python" .githooks/check_staged.py; then
+    echo "pre-commit: staged-file safety failed" >&2
+    exit 1
+fi
+if ! git diff --cached --check; then
+    echo "pre-commit: staged whitespace check failed" >&2
+    exit 1
+fi
+
+ruff=.venv/bin/ruff
+if [ ! -x "$ruff" ]; then
+    ruff=$(command -v ruff || true)
+fi
+if [ -z "$ruff" ]; then
+    echo "pre-commit: install Ruff with: python -m pip install -c .github/ci-constraints.txt ruff" >&2
+    exit 1
+fi
+version=$(sed -n 's/^ruff==//p' .github/ci-constraints.txt)
+if [ -z "$version" ] || [ "$("$ruff" --version)" != "ruff $version" ]; then
+    echo "pre-commit: Ruff must match the version in .github/ci-constraints.txt" >&2
+    exit 1
+fi
+if ! "$ruff" format --check --no-cache src bench tests; then
+    echo "pre-commit: Ruff formatting failed; review formatting changes before staging" >&2
+    exit 1
+fi
+if ! "$ruff" check --no-cache src bench tests; then
+    echo "pre-commit: Ruff lint failed" >&2
+    exit 1
+fi
+
+echo "pre-commit: TRY004 advisory review (non-blocking)"
+if ! "$ruff" check --no-cache --select TRY004 --exit-zero src bench tests; then
+    echo "pre-commit: Ruff advisory check failed to run" >&2
+    exit 1
+fi

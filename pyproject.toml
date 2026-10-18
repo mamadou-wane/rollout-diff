@@ -19,10 +19,12 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-markers = ["local_data: integration checks against optional local rollout dumps"]
+markers = ["local_data: integration checks against optional local rollout dumps or source snapshots"]
 
 [tool.ruff]
 src = [".", "src"]
 
 [tool.ruff.lint]
 extend-select = ["I", "UP", "B", "SIM", "RUF"]
+# Validation APIs use ValueError; TRY004 is reviewed separately as advisory.
+ignore = ["TRY004"]

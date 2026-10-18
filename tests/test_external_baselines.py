@@ -155,6 +155,7 @@ def test_missing_optional_sources_report_unavailable():
     assert all(item["provenance"]["revision"] for item in result.values())
 
 
+@pytest.mark.local_data
 def test_real_pinned_apis_preserve_finding_serialization_and_missingness():
     source = os.environ.get("ROLLOUTDIFF_EXTERNAL_SOURCES")
     if not source:
@@ -292,6 +293,7 @@ def test_findings_export_templates_and_metrics_without_sample_text_or_ids():
     assert sentinel not in json.dumps([probe, doctor])
 
 
+@pytest.mark.local_data
 def test_real_external_results_never_export_distinctive_input_text():
     import json
 
@@ -357,6 +359,7 @@ def test_namespace_root_cannot_be_replaced_by_ambient_regular_package(
         assert Path(module.__file__).resolve() == pinned.resolve()
 
 
+@pytest.mark.local_data
 def test_real_cherrl_namespace_ignores_ambient_detection_package(tmp_path, monkeypatch):
     import importlib
     import json
@@ -390,6 +393,7 @@ def test_real_cherrl_namespace_ignores_ambient_detection_package(tmp_path, monke
 
 
 @pytest.mark.parametrize("name", ["rlprobe", "rldoctor"])
+@pytest.mark.local_data
 def test_real_regular_packages_are_bound_to_verified_source(
     tmp_path, monkeypatch, name
 ):
@@ -466,6 +470,7 @@ def test_explicit_reward_groups_require_complete_mapping_and_keep_singletons_una
     assert record["zero_var_group_frac"] is None
 
 
+@pytest.mark.local_data
 def test_real_rlprobe_sample_records_keep_exact_prompt_ids_with_explicit_reward_groups(
     monkeypatch,
 ):

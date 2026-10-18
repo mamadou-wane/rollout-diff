@@ -1,0 +1,23 @@
+# CI pins for the existing project, test, and build dependencies, plus Ruff.
+annotated-types==0.8.0
+iniconfig==2.3.1
+# NumPy 2.5 requires Python 3.12 or newer.
+numpy==2.4.6; python_version == "3.11"
+numpy==2.5.4; python_version >= "3.12"
+packaging==26.3
+pandas==2.3.3
+pluggy==1.7.0
+pyarrow==26.0.0
+pydantic==2.14.1
+pydantic-core==2.50.1
+Pygments==2.21.0
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+pytz==2026.5
+ruff==0.17.0
+setuptools==84.0.0
+six==1.17.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.5
+wheel==0.48.0
