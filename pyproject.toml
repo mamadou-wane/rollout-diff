@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rolloutdiff"
+version = "0.0.1"
+description = "Deterministic analysis of behavioral changes in RL rollouts"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26", "pandas>=2.2,<3", "pyarrow>=17", "pydantic>=2,<3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["local_data: integration checks against optional local rollout dumps"]
+
+[tool.ruff]
+src = [".", "src"]
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "SIM", "RUF"]
