@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [m0-foundation, main]
+    branches: [main]
   pull_request:
-    branches: [m0-foundation, main]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
