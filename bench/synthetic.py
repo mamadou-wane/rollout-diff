@@ -11,6 +11,7 @@ from numbers import Real
 import numpy as np
 import pandas as pd
 
+from rolloutdiff._sampling import cluster_standard_error, resolve_sampling_units
 from rolloutdiff.detect import detect_sequential
 from rolloutdiff.features import FeatureTables
 from rolloutdiff.retrospective import detect_retrospective
@@ -38,6 +39,11 @@ _ASSUMPTIONS = (
     "binary_common_probability_clipped_to_unit_interval",
     "continuous_gaussian_prompt_means_without_support_constraints",
 )
+_UNIT_ASSUMPTIONS = (
+    "independent_sampling_units_per_step",
+    "equal_weight_sampling_unit_generation",
+    *(name for name in _ASSUMPTIONS if name != "independent_prompt_groups_per_step"),
+)
 _AR_LIMIT = 0.95
 _MIN_BASELINE_STEPS = 8
 
@@ -56,29 +62,44 @@ class SyntheticEvaluation:
     settings: dict
 
 
-def _baseline_moments(baseline, values):
+def _clustered_step_means(frame):
+    """Equal-exact-prompt step means and squared CR1 SEs over sampling units."""
+    prompt = frame.groupby(["step", "prompt_id"], sort=True).agg(
+        mean=("value", "mean"), unit=("sampling_unit_id", "first")
+    )
+    steps = prompt.groupby(level="step", sort=True)
+    errors_squared = [
+        cluster_standard_error(step["mean"].to_numpy(), step.unit.to_numpy()) ** 2
+        if np.isfinite(step["mean"]).all()
+        else np.nan
+        for _, step in steps
+    ]
+    return steps["mean"].mean().to_numpy(), np.array(errors_squared)
+
+
+def _baseline_moments(baseline, values, group_key):
     # Preserve nonfinite moments as unavailable: max(0, NaN) would yield zero
     # variance, and infinite values cannot define a generated series.
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        prompt = (
-            baseline[["step", "prompt_id"]]
-            .assign(value=values)
-            .groupby(["step", "prompt_id"], sort=True)
-            .value.agg(["mean", "var", "size"])
+        frame = baseline[["step", "prompt_id", "sampling_unit_id"]].assign(value=values)
+        groups = frame.groupby(["step", group_key], sort=True).value.agg(
+            ["mean", "var", "size"]
         )
-        prompt["sampling_variance"] = prompt["var"] / prompt["size"]
-        step_group = prompt.groupby(level="step", sort=True)
-        means = step_group["mean"].mean().to_numpy()
-        prompt_variances = step_group["mean"].var(ddof=1).to_numpy()
+        groups["sampling_variance"] = groups["var"] / groups["size"]
+        step_group = groups.groupby(level="step", sort=True)
+        group_variances = step_group["mean"].var(ddof=1).to_numpy()
         sampling = step_group.sampling_variance.mean().to_numpy()
-        n_prompts = step_group.size().to_numpy()
-        errors_squared = prompt_variances / n_prompts
+        if group_key == "prompt_id":
+            means = step_group["mean"].mean().to_numpy()
+            errors_squared = group_variances / step_group.size().to_numpy()
+        else:
+            means, errors_squared = _clustered_step_means(frame)
         mean = float(means.mean())
         within = float(
-            (prompt["var"] * (prompt["size"] - 1)).sum() / (prompt["size"] - 1).sum()
+            (groups["var"] * (groups["size"] - 1)).sum() / (groups["size"] - 1).sum()
         )
-        observed_prompt_variance = float(prompt_variances.mean())
-        prompt_raw = float(np.mean(prompt_variances - sampling))
+        observed_prompt_variance = float(group_variances.mean())
+        prompt_raw = float(np.mean(group_variances - sampling))
         step_variance = float(means.var(ddof=1))
         step_sampling = float(errors_squared.mean())
         temporal_raw = step_variance - step_sampling
@@ -98,7 +119,7 @@ def _baseline_moments(baseline, values):
 
 
 def _fit_profile(
-    metadata, common, unavailable, baseline, dense, dense_names, sparse_ids
+    metadata, common, unavailable, baseline, group_key, dense, dense_names, sparse_ids
 ):
     row = dict(
         **common,
@@ -137,13 +158,17 @@ def _fit_profile(
         values = baseline.sample_id.isin(sparse_ids.get(name, set())).to_numpy(
             dtype=float
         )
-    moments, means, errors_squared = _baseline_moments(baseline, values)
+    moments, means, errors_squared = _baseline_moments(baseline, values, group_key)
     row.update(moments)
     if not np.isfinite(list(moments.values())).all():
         row["reason"] = "nonfinite_baseline_moments"
         return row
     prompt_variance = max(0.0, moments["prompt_variance_raw"])
-    temporal = max(0.0, moments["temporal_variance_raw"])
+    # Roundoff between two nearly equal variances is not an identified common
+    # term; it would otherwise yield an arbitrary AR coefficient.
+    temporal_raw = moments["temporal_variance_raw"]
+    tolerance = 8 * np.finfo(float).eps * moments["observed_step_variance"]
+    temporal = temporal_raw if temporal_raw > tolerance else 0.0
     ar_raw = moments["lag1_covariance"] / temporal if temporal > 0 else np.nan
     ar1 = float(np.clip(ar_raw, -_AR_LIMIT, _AR_LIMIT)) if temporal > 0 else 0.0
     degenerate = metadata["kind"] == "binary" and (values == values[0]).all()
@@ -283,7 +308,7 @@ def _evaluate_trial(trial, detector, diagnostics, events, step_name, timing_tole
         row.update(flagged=True, event_step=event_step)
         if not trial["planted"]:
             row["outcome"] = "false_alert"
-        elif detector == "sequential" and event_step < trial["onset"]:
+        elif detector == "sequential" and int(event["onset_step"]) < trial["onset"]:
             row["outcome"] = "early_alert"
         elif event.direction != ("up" if trial["effect"] > 0 else "down"):
             row["outcome"] = "wrong_direction"
@@ -356,8 +381,15 @@ def fit_baseline(
     run: str,
     window: tuple[int, int],
     feature_names: list[str] | None = None,
+    sampling_units: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Fit baseline-only moments, retaining unavailable and degenerate profiles."""
+    """Fit baseline-only moments, retaining unavailable and degenerate profiles.
+
+    Units that group exact prompts become the independent groups: the schedule,
+    between-group and pooled within-group variances use units, and each step's
+    sampling variance is the squared CR1 SE of the equal-exact-prompt mean.
+    Singleton units reproduce the exact-prompt fit.
+    """
     if (
         not isinstance(window, tuple)
         or len(window) != 2
@@ -367,8 +399,11 @@ def fit_baseline(
         raise ValueError("window must be an ordered pair of nonnegative integer steps")
     rollouts = validate_rollouts(rollouts)
     dense_names = _validate_features(rollouts, features)
+    units = resolve_sampling_units(rollouts, sampling_units)
     if not rollouts.run.eq(run).any():
         raise ValueError("run has no rollouts")
+    clustered = units.loc[units.run.eq(run)].sampling_unit_id.duplicated().any()
+    group_key = "sampling_unit_id" if clustered else "prompt_id"
     catalog = pd.concat(
         [
             features.catalog[["feature", "tier", "kind"]],
@@ -395,6 +430,7 @@ def fit_baseline(
     catalog = catalog.sort_values("feature")
     baseline = (
         rollouts.loc[rollouts.run.eq(run) & rollouts.step.between(*window)]
+        .merge(units, on=["run", "prompt_id"], validate="many_to_one")
         .sort_values(["step", "prompt_id", "sample_id"])
         .reset_index(drop=True)
     )
@@ -405,7 +441,7 @@ def fit_baseline(
         name: set(group.sample_id)
         for name, group in sparse.groupby("feature", sort=False)
     }
-    groups = baseline.groupby(["step", "prompt_id"], sort=True).size()
+    groups = baseline.groupby(["step", group_key], sort=True).size()
     schedule = tuple(
         tuple(int(v) for v in step.to_numpy())
         for _, step in groups.groupby(level="step")
@@ -418,9 +454,14 @@ def fit_baseline(
         "group_size_schedule": schedule,
         "n_steps": len(steps),
         "n_rollouts": len(baseline),
-        "n_prompt_groups": len(groups),
+        "n_prompt_groups": len(baseline[["step", "prompt_id"]].drop_duplicates()),
         "n_distinct_prompts": baseline.prompt_id.nunique(),
-        "assumptions": _ASSUMPTIONS,
+        "group_definition": "sampling_unit" if clustered else "exact_prompt",
+        "n_sampling_unit_groups": len(
+            baseline[["step", "sampling_unit_id"]].drop_duplicates()
+        ),
+        "n_sampling_units": baseline.sampling_unit_id.nunique(),
+        "assumptions": _UNIT_ASSUMPTIONS if clustered else _ASSUMPTIONS,
         "ar1_limit": _AR_LIMIT,
         "minimum_baseline_steps": _MIN_BASELINE_STEPS,
     }
@@ -434,7 +475,14 @@ def fit_baseline(
     return pd.DataFrame(
         [
             _fit_profile(
-                metadata, common, unavailable, baseline, dense, dense_names, sparse_ids
+                metadata,
+                common,
+                unavailable,
+                baseline,
+                group_key,
+                dense,
+                dense_names,
+                sparse_ids,
             )
             for metadata in catalog.to_dict("records")
         ]
@@ -488,7 +536,11 @@ def generate_fitted(
         "binary_effect": float(binary_effect),
         "continuous_effect_sd": float(continuous_effect_sd),
         "planted": planted,
-        "assumptions": _ASSUMPTIONS,
+        "assumptions": tuple(
+            dict.fromkeys(
+                name for row in fits.get("assumptions", [_ASSUMPTIONS]) for name in row
+            )
+        ),
     }
     rows, trials = [], []
     for fit in fits.sort_values(["source_run", "feature"]).to_dict("records"):

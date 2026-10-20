@@ -10,8 +10,7 @@ _KEYWORDS = ("array", "graph")
 
 # Fixed comparison windows: the report places bisect at 81 without an archived
 # detector record; archived run_tests onset is 110 and alert is 112 (three-step
-# sustain). The product plan specifies the wider 80-100 / 140-160 comparison.
-# These comparisons provide descriptive evidence only.
+# sustain).
 _CASES = [
     {
         "feature": "call:bisect.bisect_left",

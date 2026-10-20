@@ -8,7 +8,7 @@ from numbers import Real
 import numpy as np
 import pandas as pd
 
-from ._dependence import confirm_ar1
+from ._dependence import confirm_ar1, quasi_binomial_errors
 from ._series_validation import validate_series
 
 _COMMON = ["run", "feature", "tier", "kind"]
@@ -38,6 +38,7 @@ _DEPENDENCE = [
     "independent_selected",
     "independent_reason",
     "covariance_status",
+    "covariance_measurement",
     "covariance_gain",
     "covariance_penalty",
     "covariance_null_rho",
@@ -159,21 +160,19 @@ def detect_retrospective(
 ) -> RetrospectiveResult:
     """Select at most one full-run mean shift per run/feature.
 
-    Minimize two-segment SSE with ``min_segment_steps`` rows per side, then require
-    minimum absolute effect and SSE0 - SSE1 > penalty_multiplier * log(n) * variance,
-    where variance = max(SSE1/(n-2), mean(SE**2)). Apply the effect cutoff only
-    to the selected boundary, allowing floating-point roundoff at the cutoff.
+    The best two-segment L2 split (``changepoint_step`` starts the right
+    segment) is selected when its absolute effect reaches the kind's minimum
+    change and SSE0 - SSE1 > ``penalty_multiplier`` * log(n) * variance, where
+    variance = max(SSE1/(n-2), mean(SE**2)). Missing SE or too few rows is
+    unscorable.
 
-    Default AR(1) confirmation profiles separate null/step means on ``_dependence``'s
-    fixed covariance grid. Gain must exceed multiplier * log(n), with matching
-    effect direction. It can only remove L2 selections; exact zero-SE steps remain
-    selected with unconfirmed covariance. ``independent`` skips confirmation.
-
-    The boundary is the first right-segment step and may move with appended data.
-    Missing SE or too few rows is unscorable. Cost/variance ``_scaled`` fields divide
-    by max(|x-x_first|, SE)**2; covariance delta divides by that scale. Other effects
-    and RMS SE retain original units. AR dependence follows logged rows, including
-    gaps. Neither mode is calibrated or robust to outliers/transients.
+    ``dependence="ar1"`` keeps a selection only if, with a stationary AR(1)
+    covariance profiled under each mean model, twice the log-likelihood gain
+    exceeds ``penalty_multiplier`` * log(n) and the GLS shift keeps its
+    direction; exact piecewise-constant zero-SE splits stay selected as
+    ``exact_zero_variance_unconfirmed``. AR lags count logged rows, ignoring
+    step gaps. ``*_scaled`` diagnostics divide by ``normalization_scale``
+    (squared for costs and variances); other effects keep input units.
     """
     if dependence not in ("ar1", "independent"):
         raise ValueError("dependence must be ar1 or independent")
@@ -245,6 +244,7 @@ def detect_retrospective(
 
 
 def _select_candidate(row: dict, x: np.ndarray, kind: str, effect: float) -> None:
+    # Allow float64 roundoff so an effect exactly at the cutoff qualifies.
     tolerance = (
         4
         * np.finfo(float).eps
@@ -260,7 +260,7 @@ def _select_candidate(row: dict, x: np.ndarray, kind: str, effect: float) -> Non
         row.update(status="change", reason="penalized_fit")
 
 
-def _confirm_candidate(row, x, se, k, penalty_multiplier, dependence):
+def _confirm_candidate(row, x, se, units, k, kind, penalty_multiplier, dependence):
     row.update(
         independent_selected=row["status"] == "change",
         independent_reason=row["reason"],
@@ -281,7 +281,28 @@ def _confirm_candidate(row, x, se, k, penalty_multiplier, dependence):
             errors = se / scale
             if np.any((se > 0) & (errors == 0)):
                 raise FloatingPointError("measurement SE underflow")
-            row.update(confirm_ar1(normalized, errors, k, float(penalty_multiplier)))
+            null_errors, row["covariance_measurement"] = errors, "step_se"
+            if kind == "binary":
+                constant = np.full(len(x), x.mean())
+                modelled = quasi_binomial_errors(x, errors, units, constant)
+                if modelled is not None:
+                    segments = np.where(
+                        np.arange(len(x)) < k, row["mean_before"], row["mean_after"]
+                    )
+                    null_errors, row["covariance_measurement"] = (
+                        modelled,
+                        "quasi_binomial_se",
+                    )
+                    errors = quasi_binomial_errors(x, errors, units, segments)
+            row.update(
+                confirm_ar1(
+                    normalized,
+                    null_errors,
+                    k,
+                    float(penalty_multiplier),
+                    alternative_errors=errors,
+                )
+            )
     except FloatingPointError:
         raise ValueError(
             "numerical overflow or underflow fitting retrospective covariance"
@@ -308,6 +329,7 @@ def _detect_group(
 ):
     kind, tier = group.kind.iloc[0], group.tier.iloc[0]
     x, se, steps = group["mean"].to_numpy(), group.se.to_numpy(), group.step.to_numpy()
+    units = group.n_sampling_units.to_numpy(dtype=float)
     n = len(x)
     effect = float(min_prevalence_change if kind == "binary" else min_continuous_change)
     row = {name: np.nan for name in _DIAGNOSTICS}
@@ -353,7 +375,7 @@ def _detect_group(
         n_candidates=n - 2 * min_segment_steps + 1,
     )
     _select_candidate(row, x, kind, effect)
-    _confirm_candidate(row, x, se, k, penalty_multiplier, dependence)
+    _confirm_candidate(row, x, se, units, k, kind, penalty_multiplier, dependence)
     change = None
     if row["status"] == "change":
         change = {name: row[name] for name in [*_COMMON, *_SEGMENT]}

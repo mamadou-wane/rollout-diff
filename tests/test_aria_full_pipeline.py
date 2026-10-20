@@ -23,6 +23,9 @@ def local_report():
     report = run_local(source)
     output = os.environ.get("ROLLOUTDIFF_METRICS_PATH")
     if output:
+        root = Path(__file__).resolve().parents[1]
+        if Path(output).resolve().is_relative_to(root):
+            pytest.fail("ROLLOUTDIFF_METRICS_PATH must point outside the repository")
         Path(output).write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     return report
 
@@ -40,6 +43,11 @@ def test_local_aria_full_vocabulary_preserves_every_series_and_status(local_repo
     }
     for name in ("sequential_screening", "retrospective_screening"):
         assert pipeline[name][0]["n_series"] == pipeline["series_count"]
+    assert (
+        pipeline["n_floor_dominated_alerts"]
+        <= pipeline["sequential_screening"][0]["n_alerted"]
+    )
+    assert pipeline["n_floor_dominated_series"] <= pipeline["series_count"]
     for counts in pipeline["status_counts"].values():
         assert sum(counts.values()) == pipeline["series_count"]
 
@@ -149,4 +157,30 @@ def test_local_fitted_evaluation_reports_denominators_and_distinct_timing(local_
             assert summary["mean_absolute_boundary_error"] is None
         else:
             assert summary["mean_alert_delay"] is None
-    # Report fitted-model quality for the fixed profiles and seeds.
+
+
+def test_local_acceptance_matches_pooled_primary_counts(local_report):
+    overall = {
+        (row["detector"], row["planted"]): row
+        for row in local_report["synthetic"]["overall"]
+        if row["evaluation_group"] == "primary"
+    }
+    for detector, block in local_report["acceptance"].items():
+        planted, null = overall[(detector, True)], overall[(detector, False)]
+        within = "n_timely" if detector == "sequential" else "n_localized"
+        assert block["n_planted"] == planted["n_generated"]
+        assert block["n_within_tolerance"] == planted[within]
+        assert block["n_null"] == null["n_generated"]
+        assert block["n_false_alerts"] == null["n_flagged"]
+        assert block["thresholds"] == {
+            "detection_within_tolerance": 0.95,
+            "null_false_alert_rate": 0.005,
+        }
+
+
+def test_local_sequential_meets_synthetic_acceptance(local_report):
+    assert local_report["acceptance"]["sequential"]["met"]
+
+
+def test_local_retrospective_meets_synthetic_acceptance(local_report):
+    assert local_report["acceptance"]["retrospective"]["met"]

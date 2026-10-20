@@ -45,10 +45,7 @@ REQUIRED_COLUMNS = [
 
 
 def validate_rollouts(table: pd.DataFrame) -> pd.DataFrame:
-    """Validate required fields and step types; reset the positional index.
-
-    Join records by (run, sample_id).
-    """
+    """Validate required fields and step types; reset the positional index."""
     if not table.columns.is_unique:
         raise ValueError("duplicate rollout columns")
     missing = set(REQUIRED_COLUMNS) - set(table.columns)

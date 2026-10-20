@@ -374,3 +374,27 @@ def test_inputs_are_not_mutated_and_unselected_runs_are_excluded():
 def test_invalid_tolerance_fails(tolerance):
     with pytest.raises(ValueError, match="tolerance"):
         replicate(fixture([[0] * 3 + [1] * 8] * 2), tolerance=tolerance)
+
+
+def test_unavailable_se_before_half_alert_makes_first_alert_ambiguous():
+    # Half 0 rises at steps 4-5 with SE unavailable at step 6, where it could have
+    # alerted five positions before the full alert at 11, outside tolerance 2.
+    rows, features = fixture([[0] * 3 + [1, 1, 0, 0, 0, 1, 1, 1], [0] * 8 + [1] * 3])
+    names = rows.loc[
+        rows.prompt_id.map(lambda p: zlib.crc32(p.encode()) & 1).eq(0), "prompt_id"
+    ].unique()
+    rows = rows.loc[~(rows.step.eq(6) & rows.prompt_id.isin(names[1:]))]
+    features = FeatureTables(
+        features.dense.loc[features.dense.sample_id.isin(rows.sample_id)],
+        features.sparse,
+        features.catalog,
+    )
+    for policy in ("contiguous_prefix", "fixed_window"):
+        result = replicate((rows, features), coverage_policy=policy)
+        assert result.full.alerts.iloc[0].alert_step == 11
+        half = result.halves.iloc[0]
+        assert half.status == "unavailable"
+        assert half.reason == "ambiguous_first_alert"
+        assert pd.isna(half.alert_step) and half.n_unscorable == 1
+        assert result.halves.iloc[1].alert_step == 11
+        assert result.status == "unavailable" and result.replicates is None

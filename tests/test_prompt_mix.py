@@ -84,6 +84,21 @@ def test_window_means_pool_rollouts_within_each_prompt_not_steps():
     assert result.positive_prompts == 1
 
 
+def test_schedule_driven_rise_leaves_shared_prompts_unchanged():
+    # Prompts a and b appear in both windows with the feature fixed on each;
+    # c and d appear only after and carry it. Step prevalence rises from 0.5 to
+    # 0.75.
+    rows = [("r", 1, "a", "alpha", 0)] * 2 + [("r", 1, "b", "beta", 1)] * 2
+    rows += [("r", 2, "a", "alpha", 0)] * 2 + [("r", 2, "b", "beta", 1)] * 2
+    rows += [("r", 2, "c", "gamma", 1)] * 2 + [("r", 2, "d", "delta", 1)] * 2
+    result = compare(*make(rows))
+    assert (result.positive_prompts, result.total_prompts) == (3, 4)
+    assert result.shared_prompts == 2
+    assert result.shared_change == 0 and result.shared_se == 0
+    detail = result.per_prompt.set_index("prompt_id")
+    assert detail.loc[["c", "d"], "before_mean"].isna().all()
+
+
 def test_zero_shared_prompts_is_unavailable_not_zero_change():
     result = compare(*make([("r", 1, "a", "alpha", 1), ("r", 2, "b", "beta", 0)]))
     assert result.shared_prompts == 0

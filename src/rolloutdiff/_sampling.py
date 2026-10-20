@@ -85,8 +85,7 @@ def cluster_standard_error(values, unit_ids) -> float | None:
     """CR1 SE of an equal-prompt mean over explicit sampling units.
 
     For P prompts and U units: sqrt(U/(U-1) * sum(unit residual sums**2)) / P.
-    Unequal unit sizes retain prompt weights. Fewer than two units returns None;
-    small-cluster inference remains uncalibrated.
+    Unequal unit sizes retain prompt weights. Fewer than two units returns None.
     """
     data = np.asarray(values)
     units = np.asarray(unit_ids, dtype=object)

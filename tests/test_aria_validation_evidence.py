@@ -15,13 +15,6 @@ from rolloutdiff.series import aggregate
 
 pytestmark = pytest.mark.local_data
 
-# Policy: whole-prompt CRC32 halves; the default
-# sequential detector in each half; at most ten full-run logged observations
-# after the full alert; all three first alerts agree in direction and fall
-# within ten observations. Persistence starts strictly after the full alert,
-# retaining half its signed baseline departure. Reward differences use only
-# mixed (step, prompt) groups over onset through alert, with equal group weight.
-# These named-series checks leave error calibration unmeasured.
 _EXPECTED = {
     "def:run_tests": {
         "onset_step": 110,
@@ -147,7 +140,6 @@ def _direct_association(rollouts, features, feature, start, end):
 
 @pytest.fixture(scope="module")
 def aria_data():
-    # Read and extract the entire pinned local fixture only once in this module.
     rollouts, features = load_aria([(1, 200)])
     assert len(rollouts) == 51200
     assert rollouts.step.nunique() == 200
@@ -303,7 +295,6 @@ def test_local_aria_split_halves_match_direct_reference(
     assert result.full.alerts.iloc[0].alert_step == expected["alert_step"]
     assert result.full.alerts.iloc[0].onset_step == expected["onset_step"]
 
-    # Each prompt's completions must stay together and preserve step counts.
     assigned = aria_data["rollouts"].merge(
         result.assignments, on=["run", "prompt_id"], validate="many_to_one"
     )
@@ -376,8 +367,6 @@ def test_local_aria_reward_association_matches_direct_reference(
         .isna()
         .all()
     )
-    # Dependent training observations support a descriptive reward difference,
-    # without an inferential interval, p-value, or causal interpretation.
     assert not {"pvalue", "p_value", "ci_low", "ci_high"}.intersection(
         result.groups.columns
     )

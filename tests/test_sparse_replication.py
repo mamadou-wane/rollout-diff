@@ -27,7 +27,7 @@ def remove_prompts_at(data, half, step):
     return rows, features
 
 
-def test_dense_fixed_window_matches_legacy():
+def test_dense_fixed_window_matches_contiguous_prefix():
     data = fixture([[0] * 3 + [1] * 8] * 2)
     old, new = replicate(data), sparse(data)
     assert old.coverage_policy == "contiguous_prefix"

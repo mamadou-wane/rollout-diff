@@ -298,3 +298,31 @@ def test_empty_feature_extraction_can_be_aggregated():
     result = run_aggregate(df, featurize(df))
     assert result.series.empty
     assert result.prompt_schedule.empty
+
+
+def test_identical_prompt_proportions_have_exactly_zero_sparse_se():
+    # Every prompt mean is 1/3 for both the dense and sparse feature; a one-pass
+    # variance would leave roundoff above the detector's 1e-9 numerical floor.
+    rows, dense_rows, sparse_rows = [], [], []
+    for prompt in range(13):
+        for copy in range(3):
+            sample = f"{prompt}:{copy}"
+            rows.append(("r", 0, sample, f"p{prompt}", "q", "", 0.0))
+            dense_rows.append(
+                {"run": "r", "sample_id": sample, "flag": float(copy == 0)}
+            )
+            if copy == 0:
+                sparse_rows.append({"run": "r", "sample_id": sample, "feature": "s"})
+    df = pd.DataFrame(rows, columns=rollouts().columns)
+    features = SimpleNamespace(
+        dense=pd.DataFrame(dense_rows),
+        sparse=pd.DataFrame(sparse_rows),
+        catalog=pd.DataFrame(
+            [("flag", "structural", "binary"), ("s", "structural", "binary")],
+            columns=["feature", "tier", "kind"],
+        ),
+    )
+    series = run_aggregate(df, features).series.set_index("feature")
+    assert series.loc["flag", "mean"] == series.loc["s", "mean"]
+    assert series.loc["flag", "se"] == 0.0
+    assert series.loc["s", "se"] == 0.0

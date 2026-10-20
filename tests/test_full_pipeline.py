@@ -363,3 +363,15 @@ def test_detail_concat_preserves_all_missing_columns_and_large_optional_steps():
     assert result.loc[0, "reason"] == "missing_uncertainty"
     assert pd.isna(result.loc[1, "reason"])
     assert result.always_missing.isna().all()
+
+
+def test_evidence_reports_scale_source_and_numerical_floor_dominance():
+    result = analyze(fixture())
+    target = row(result)
+    assert target.scale_source == "numerical_floor"
+    assert target.numerical_floor_dominant
+    assert result.evidence.numerical_floor_dominant.dtype == bool
+    unscorable = row(analyze(fixture(single_prompt=True)))
+    assert unscorable.sequential_status == "insufficient_baseline_uncertainty"
+    assert unscorable.scale_source is None
+    assert not unscorable.numerical_floor_dominant

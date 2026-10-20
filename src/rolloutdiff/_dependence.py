@@ -1,9 +1,7 @@
-"""Profile stationary AR(1) covariance for a fixed boundary, without calibration.
+"""Profile stationary AR(1) covariance for a fixed boundary.
 
-Both mean models use rho=(-.95, -.5, 0, .5, .8, .95, .99) and latent variance
-multipliers (2**-16, 2**-12, 2**-8, 2**-6, 2**-4, 2**-2, 1, 4) of the larger
-full-run sample variance or mean measured SE squared. Each mean model profiles
-its own covariance, including log determinants; grid-bound flags report limits.
+Each mean model profiles its own covariance, including log determinants;
+grid-bound flags report limits.
 """
 
 from __future__ import annotations
@@ -51,6 +49,33 @@ def _whiten_ar1(
     return whitened, logdet
 
 
+def quasi_binomial_errors(
+    prevalence: np.ndarray, errors: np.ndarray, units: np.ndarray, means: np.ndarray
+) -> np.ndarray | None:
+    """Model-based binary measurement errors sqrt(phi * m (1 - m) / U_t).
+
+    Unit proportions at prevalence p_t vary as phi * p_t (1 - p_t), so the
+    measured between-unit variances U_t SE_t**2 of the steps with 0 < p_t < 1
+    estimate one dispersion phi, pooled by unit degrees of freedom. Evaluated at
+    a mean model's segment means m, an all-agree step inside a segment with
+    positive prevalence is not a known zero, while an all-zero segment keeps
+    zero variance. Returns None when no step identifies phi.
+    """
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        measured = errors**2
+        if np.any((errors > 0) & (measured == 0)):
+            raise FloatingPointError("measurement variance underflow")
+        mixed = (prevalence > 0) & (prevalence < 1)
+        if not mixed.any():
+            return None
+        freedom = units[mixed] - 1
+        spread = prevalence[mixed] * (1 - prevalence[mixed])
+        dispersion = np.sum(freedom * units[mixed] * measured[mixed]) / np.sum(
+            freedom * spread
+        )
+        return np.sqrt(dispersion * means * (1 - means) / units)
+
+
 def _profile_ar1(
     y: np.ndarray,
     errors: np.ndarray,
@@ -81,24 +106,53 @@ def _profile_ar1(
 
 
 def confirm_ar1(
-    y: np.ndarray, errors: np.ndarray, boundary: int, penalty_multiplier: float
+    y: np.ndarray,
+    errors: np.ndarray,
+    boundary: int,
+    penalty_multiplier: float,
+    alternative_errors: np.ndarray | None = None,
 ) -> dict:
     """Confirm a fixed L2 boundary using caller-normalized data and SE.
 
-    Gain is twice the profiled log likelihood improvement; penalty is dimensionless.
+    ``errors`` enter the constant-mean model and ``alternative_errors`` (default
+    the same) the split-mean model; each profiles the shared latent grid. Gain is
+    twice the profiled log likelihood improvement; penalty is dimensionless.
     """
     with np.errstate(over="raise", invalid="raise", divide="raise"):
-        reference = max(float(np.var(y, ddof=1)), float(np.mean(errors**2)))
+        if alternative_errors is None or np.array_equal(alternative_errors, errors):
+            alternative_errors = errors
+        reference = max(
+            float(np.var(y, ddof=1)),
+            float(np.mean(errors**2)),
+            float(np.mean(alternative_errors**2)),
+        )
         variances = reference * _VARIANCE_MULTIPLIERS
         if reference <= 0 or np.any(variances <= 0):
             raise FloatingPointError("covariance variance reference underflow")
-        rho = np.repeat(_RHO, len(variances))
-        variance = np.tile(variances, len(_RHO))
-        # A zero-latent-variance model is nonsingular only with positive SEs.
-        if np.all(errors > 0):
-            rho = np.r_[rho, 0.0]
-            variance = np.r_[variance, 0.0]
-        null, alternative, deltas = _profile_ar1(y, errors, boundary, rho, variance)
+        fits, grid_fits = {}, 0
+        for name, model_errors in (
+            ("null", errors),
+            ("alternative", alternative_errors),
+        ):
+            if name == "alternative" and alternative_errors is errors:
+                fits[name] = fits["null"]
+                continue
+            rho = np.repeat(_RHO, len(variances))
+            variance = np.tile(variances, len(_RHO))
+            # A zero-latent-variance model is nonsingular only with positive SEs.
+            if np.all(model_errors > 0):
+                rho = np.r_[rho, 0.0]
+                variance = np.r_[variance, 0.0]
+            fits[name] = (
+                *_profile_ar1(y, model_errors, boundary, rho, variance),
+                rho,
+                variance,
+            )
+            grid_fits += len(rho)
+        null, _, _, null_rho, null_variance = fits["null"]
+        _, alternative, deltas, alternative_rho, alternative_variance = fits[
+            "alternative"
+        ]
         null_index, alternative_index = (
             int(np.argmin(null)),
             int(np.argmin(alternative)),
@@ -109,7 +163,9 @@ def confirm_ar1(
             * np.finfo(float).eps
             * max(1.0, abs(null[null_index]), abs(alternative[alternative_index]))
         )
-        if gain < -roundoff:
+        # Separate measurement variances are not nested, so the split model
+        # may fit worse; identical variances must not.
+        if gain < -roundoff and alternative_errors is errors:
             raise FloatingPointError("nested covariance fit has negative gain")
         gain = max(0.0, gain)
         penalty = float(penalty_multiplier * np.log(len(y)))
@@ -118,9 +174,12 @@ def confirm_ar1(
             "covariance_gain": gain,
             "covariance_penalty": penalty,
             "covariance_delta_scaled": float(deltas[alternative_index]),
-            "covariance_grid_fits": len(rho),
+            "covariance_grid_fits": grid_fits,
         }
-        for name, index in [("null", null_index), ("alternative", alternative_index)]:
+        for name, rho, variance, index in [
+            ("null", null_rho, null_variance, null_index),
+            ("alternative", alternative_rho, alternative_variance, alternative_index),
+        ]:
             result.update(
                 {
                     f"covariance_{name}_rho": float(rho[index]),

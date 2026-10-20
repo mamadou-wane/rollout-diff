@@ -1,3 +1,4 @@
+import gzip
 import json
 
 import pandas as pd
@@ -188,6 +189,77 @@ def test_verl_malformed_row_reports_location_without_contents(tmp_path):
     with pytest.raises(ValueError, match=r"2.jsonl:1") as err:
         load_verl(tmp_path, run="r")
     assert "do not echo" not in str(err.value)
+
+
+def write_verl(path, rows):
+    text = "".join(json.dumps(x) + "\n" for x in rows)
+    if path.suffix == ".gz":
+        with gzip.open(path, "wt", encoding="utf-8") as stream:
+            stream.write(text)
+    else:
+        path.write_text(text, encoding="utf-8")
+
+
+def verl_rows(step):
+    return [
+        {"step": step, "input": "q", "output": "a", "score": 0.0, "uid": "u0"},
+        {"step": step, "input": "q", "output": "b", "score": 1.0, "uid": "u1"},
+    ]
+
+
+def test_verl_gzip_padded_shard_matches_plain_layout(tmp_path):
+    plain, packed = tmp_path / "plain", tmp_path / "packed"
+    plain.mkdir()
+    packed.mkdir()
+    write_verl(plain / "1.jsonl", verl_rows(1))
+    write_verl(packed / "step_000001.jsonl.gz", verl_rows(1))
+    expected = load_verl(plain, run="verl")
+    out = load_verl(packed, run="verl")
+    assert out.sample_id.tolist() == [
+        "step_000001.jsonl.gz:0",
+        "step_000001.jsonl.gz:1",
+    ]
+    pd.testing.assert_frame_equal(
+        out.drop(columns="sample_id"), expected.drop(columns="sample_id")
+    )
+    pd.testing.assert_frame_equal(
+        out, load_verl(packed / "step_000001.jsonl.gz", run="verl")
+    )
+
+
+def test_verl_mixed_plain_and_gzip_sort_numerically_and_unrelated_ignored(tmp_path):
+    write_verl(tmp_path / "step_000010.jsonl.gz", verl_rows(10))
+    write_verl(tmp_path / "2.jsonl", verl_rows(2))
+    write_verl(tmp_path / "step_000003.jsonl", verl_rows(3))
+    write_verl(tmp_path / "val_000001.jsonl.gz", verl_rows(99))
+    write_verl(tmp_path / "step_000004.jsonl.gz.partial", verl_rows(99))
+    out = load_verl(tmp_path, run="verl")
+    assert out.step.tolist() == [2, 2, 3, 3, 10, 10]
+    assert out.sample_id.nunique() == 6
+
+
+def test_verl_malformed_gzip_row_reports_location_without_contents(tmp_path):
+    path = tmp_path / "step_000002.jsonl.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as stream:
+        stream.write(json.dumps(verl_rows(2)[0]) + '\n{"private": "do not echo"\n')
+    with pytest.raises(ValueError, match=r"step_000002\.jsonl\.gz:2") as err:
+        load_verl(tmp_path, run="r")
+    assert "do not echo" not in str(err.value)
+
+
+def test_verl_corrupt_gzip_shard_fails_with_file_name_only(tmp_path):
+    (tmp_path / "step_000003.jsonl.gz").write_bytes(b"not gzip: do not echo")
+    with pytest.raises(
+        ValueError, match=r"step_000003\.jsonl\.gz: invalid gzip"
+    ) as err:
+        load_verl(tmp_path, run="r")
+    assert "do not echo" not in str(err.value)
+    truncated = tmp_path / "step_000004.jsonl.gz"
+    write_verl(truncated, verl_rows(4))
+    truncated.write_bytes(truncated.read_bytes()[:-8])
+    (tmp_path / "step_000003.jsonl.gz").unlink()
+    with pytest.raises(ValueError, match=r"step_000004\.jsonl\.gz: invalid gzip"):
+        load_verl(tmp_path, run="r")
 
 
 def test_explicit_column_mapping_preserves_ids_and_ignores_annotations():

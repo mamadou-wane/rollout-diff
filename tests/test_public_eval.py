@@ -268,3 +268,140 @@ def test_scalar_baseline_means_preserved_but_uncertainty_uses_units():
     assert row["mean"] == pytest.approx(2 / 3)
     assert row["se"] == pytest.approx(4 / 9)
     assert row.n_prompts == 3 and row.n_sampling_units == 2
+
+
+def test_benchmark_reports_steps_to_onset_floor_dominance_and_pre_onset_list():
+    from types import SimpleNamespace
+
+    from bench.public_benchmark import evaluate_loaded
+
+    raw = pd.DataFrame(
+        [
+            {
+                "step": step,
+                "prompt": prompt,
+                "response": "def run_tests():\n    pass"
+                if step >= 16
+                else "plain words",
+                "reward": float(step >= 16),
+            }
+            for step in range(1, 21)
+            for prompt in ["a", "b"]
+            for _ in range(2)
+        ]
+    )
+    rollouts = from_table(raw, run="aria")
+    labels = rollouts[["run", "sample_id", "step", "prompt_id"]].copy()
+    labels["label_hack"] = rollouts.step.ge(16).astype(int)
+    labels["label_attempt"] = labels.label_hack
+    labels["label_correct"] = 0
+    result = evaluate_loaded(
+        SimpleNamespace(rollouts=rollouts, labels=labels, provenance={}), "aria"
+    )
+    pipeline = result["pipeline"]
+    # Every baseline series is constant, so every alert is scaled by the numerical floor.
+    assert (
+        pipeline["n_floor_dominated_alerts"]
+        == pipeline["sequential_screening"][0]["n_alerted"]
+        > 0
+    )
+    assert pipeline["pre_reference_alert_status"] == "available"
+    assert pipeline["pre_reference_alerts"] == 0
+    assert pipeline["pre_reference_alert_list"] == []
+    mechanism = next(
+        row for row in result["mechanisms"] if row["feature"] == "def:run_tests"
+    )
+    assert mechanism["steps_to_onset"] == {"0.01": 2, "0.05": 2, "0.1": 2}
+    data = SimpleNamespace(
+        rollouts=rollouts,
+        labels=labels.assign(label_hack=0, label_attempt=0),
+        provenance={},
+    )
+    other = next(
+        row
+        for row in evaluate_loaded(data, "aria")["mechanisms"]
+        if row["feature"] == "def:run_tests"
+    )
+    assert other["steps_to_onset"] == {"0.01": None, "0.05": None, "0.1": None}
+
+
+def test_pre_onset_alert_list_names_features_and_marks_unscorable_runs():
+    from types import SimpleNamespace
+
+    from bench.public_benchmark import evaluate_loaded
+
+    rows = []
+    for step in range(1, 33):
+        for prompt in ["a", "b"]:
+            early = step >= 18
+            late = step >= 26
+            rows.append(
+                {
+                    "step": step,
+                    "prompt": prompt,
+                    "response": ("import os\n" if early else "")
+                    + ("def run_tests():\n    pass" if late else "plain words"),
+                    "reward": float(late),
+                }
+            )
+    rollouts = from_table(pd.DataFrame(rows), run="aria")
+    labels = rollouts[["run", "sample_id", "step", "prompt_id"]].copy()
+    labels["label_hack"] = rollouts.step.ge(26).astype(int)
+    labels["label_attempt"] = labels.label_hack
+    labels["label_correct"] = 0
+    result = evaluate_loaded(
+        SimpleNamespace(rollouts=rollouts, labels=labels, provenance={}), "aria"
+    )
+    listed = result["pipeline"]["pre_reference_alert_list"]
+    assert result["pipeline"]["pre_reference_alerts"] == len(listed) > 0
+    assert all(entry["alert_step"] < 26 for entry in listed)
+    assert all(
+        isinstance(entry["feature"], str) and entry["target"] is False
+        for entry in listed
+    )
+    assert {entry["tier"] for entry in listed} <= {"structural", "prose"}
+    single = from_table(pd.DataFrame(rows).loc[lambda t: t.prompt.eq("a")], run="aria")
+    labels = single[["run", "sample_id", "step", "prompt_id"]].copy()
+    labels["label_hack"] = single.step.ge(26).astype(int)
+    labels["label_attempt"] = labels.label_hack
+    labels["label_correct"] = 0
+    unscorable = evaluate_loaded(
+        SimpleNamespace(rollouts=single, labels=labels, provenance={}), "aria"
+    )["pipeline"]
+    assert unscorable["sequential_screening"][0]["n_screened"] == 0
+    assert unscorable["pre_reference_alert_status"] == "unscorable"
+    assert unscorable["pre_reference_alerts"] is None
+    assert unscorable["pre_reference_alert_list"] == []
+
+
+def test_source_group_zero_variance_is_separate_from_exact_prompt_metric():
+    from bench.public_eval import scalar_baselines
+
+    raw = pd.DataFrame(
+        {
+            "step": [1] * 6,
+            "prompt": ["a", "a", "b", "b", "c", "c"],
+            "response": ["x"] * 6,
+            "reward": [1.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+        }
+    )
+    rollouts = from_table(raw, run="r")
+    prompts = rollouts[["run", "prompt_id"]].drop_duplicates()
+    units = prompts.assign(sampling_unit_id=["u", "u", "v"])
+    exact = scalar_baselines(rollouts, featurize(rollouts))
+    assert (
+        exact["unavailable"]["scalar:zero_var_source_group_frac"]
+        == "sampling_units_not_supplied"
+    )
+    assert "scalar:zero_var_source_group_frac" not in set(exact["series"].feature)
+    result = scalar_baselines(rollouts, featurize(rollouts), sampling_units=units)
+    rows = result["series"].set_index("feature")
+    # Every exact prompt is constant; source group u mixes rewards 1 and 0.
+    assert rows.loc["scalar:zero_var_group_frac", "mean"] == 1
+    assert rows.loc["scalar:zero_var_source_group_frac", "mean"] == pytest.approx(1 / 3)
+    assert "scalar:zero_var_source_group_frac" not in result["unavailable"]
+    lone = rollouts.iloc[:-1]
+    unavailable = scalar_baselines(lone, featurize(lone), sampling_units=units)[
+        "unavailable"
+    ]
+    assert unavailable["scalar:zero_var_source_group_frac"] == "singleton_source_group"

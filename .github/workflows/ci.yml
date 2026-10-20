@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [m0-foundation]
+    branches: [m0-foundation, main]
   pull_request:
-    branches: [m0-foundation]
+    branches: [m0-foundation, main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -39,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11.17", "3.13.16"]
+        python-version: ["3.11.17", "3.12.15", "3.13.16"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

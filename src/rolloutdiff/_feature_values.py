@@ -45,8 +45,7 @@ def feature_values(
 class _FeatureValueIndex:
     """Index validated identities and sparse presence for repeated evidence.
 
-    Retain required columns and sparse presence to avoid a dense
-    rollout-by-vocabulary matrix.
+    Avoids a dense rollout-by-vocabulary matrix.
     """
 
     def __init__(self, rollouts: pd.DataFrame, features: FeatureTables):

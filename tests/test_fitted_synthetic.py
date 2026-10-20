@@ -464,3 +464,169 @@ def test_nonfinite_fitted_moments_are_unavailable_not_generated():
     generated = generate_fitted(profiles, seed=1, n_replicates=1)
     assert generated.series.empty
     assert generated.trials.reason.tolist() == ["nonfinite_baseline_moments"]
+
+
+def test_roundoff_temporal_variance_is_unidentified_not_projected():
+    # One positive rollout in the whole baseline: the step variance equals the
+    # sampling variance algebraically, so the remainder is roundoff.
+    rows, features = fixture(n_prompts=16, n_rollouts=16)
+    dense = features.dense.copy()
+    dense["flag"] = 0.0
+    dense.loc[dense.sample_id.eq("3:2:1"), "flag"] = 1.0
+    profile = fit(
+        (rows, FeatureTables(dense, features.sparse, features.catalog)),
+        feature_names=["flag"],
+    ).iloc[0]
+    assert profile.fit_status == "fit"
+    assert profile.temporal_variance == 0
+    assert profile.ar1 == 0 and np.isnan(profile.ar1_raw)
+    assert not profile.ar1_projected
+
+
+def test_sequential_streak_starting_before_plant_is_early_not_detected():
+    from bench.synthetic import SyntheticBatch, evaluate_fitted
+
+    rows = [
+        {
+            "run": "early",
+            "step": step,
+            "feature": "value",
+            "tier": "structural",
+            "kind": "continuous",
+            "mean": float(step >= 39),
+            "se": 0.01,
+            "n_rollouts": 16,
+            "n_prompts": 4,
+        }
+        for step in range(80)
+    ]
+    trials = pd.DataFrame(
+        [
+            {
+                "run": "early",
+                "source_run": "r",
+                "feature": "value",
+                "tier": "structural",
+                "kind": "continuous",
+                "replicate": 0,
+                "seed": 1,
+                "planted": True,
+                "onset": 40,
+                "effect": 1.0,
+                "status": "generated",
+                "reason": "",
+                "n_probability_clipped": 0,
+                "probability_clipped_fraction": np.nan,
+            }
+        ]
+    )
+    evaluation = evaluate_fitted(SyntheticBatch(pd.DataFrame(rows), trials, {}))
+    sequential = evaluation.trials.loc[
+        evaluation.trials.detector.eq("sequential")
+    ].iloc[0]
+    # The alert at 41 completes a streak that began at 39, before the plant.
+    assert sequential.event_step == 41
+    assert sequential.outcome == "early_alert"
+    assert not sequential.detected and not sequential.timely
+
+
+def units(assignment):
+    return pd.DataFrame(
+        {
+            "run": "r",
+            "prompt_id": [f"p{i}" for i in range(8)],
+            "sampling_unit_id": assignment,
+        }
+    )
+
+
+EQUAL_UNITS = ["u0"] * 4 + ["u1"] * 4
+UNEQUAL_UNITS = ["u0"] * 3 + ["u1"] * 5
+
+
+def test_singleton_unit_map_reproduces_exact_prompt_fit():
+    identity = fit(sampling_units=units([f"p{i}" for i in range(8)]))
+    assert_frame_equal(identity, fit())
+    assert identity.group_definition.eq("exact_prompt").all()
+    assert identity.n_sampling_units.eq(8).all()
+    assert identity.n_sampling_unit_groups.eq(identity.n_prompt_groups).all()
+
+
+@pytest.mark.parametrize("assignment", [EQUAL_UNITS, UNEQUAL_UNITS])
+def test_unit_fit_groups_by_unit_and_uses_cluster_se_of_prompt_mean(assignment):
+    from rolloutdiff._sampling import cluster_standard_error
+
+    rows, features = fixture()
+    mapping = units(assignment)
+    result = fit(sampling_units=mapping).set_index("feature").loc["value"]
+    baseline = (
+        rows.loc[rows.step.le(15)]
+        .merge(features.dense, on=["run", "sample_id"])
+        .merge(mapping, on=["run", "prompt_id"])
+    )
+    prompt = baseline.groupby(["step", "prompt_id"]).agg(
+        value=("value", "mean"), unit=("sampling_unit_id", "first")
+    )
+    by_step = prompt.groupby(level="step")
+    errors = [
+        cluster_standard_error(step.value.to_numpy(), step.unit.to_numpy()) ** 2
+        for _, step in by_step
+    ]
+    unit = baseline.groupby(["step", "sampling_unit_id"]).value
+    sizes = (assignment.count("u0") * 8, assignment.count("u1") * 8)
+    assert result.group_definition == "sampling_unit"
+    assert (result.n_sampling_units, result.n_sampling_unit_groups) == (2, 30)
+    assert (result.n_distinct_prompts, result.n_prompt_groups) == (8, 120)
+    assert result.group_size_schedule == (sizes,) * 15
+    assert result["mean"] == pytest.approx(by_step.value.mean().mean())
+    assert result.step_sampling_variance == pytest.approx(np.mean(errors))
+    assert result.temporal_variance_raw == pytest.approx(
+        by_step.value.mean().var(ddof=1) - np.mean(errors)
+    )
+    assert result.within_variance == pytest.approx(
+        (unit.var() * (unit.size() - 1)).sum() / (unit.size() - 1).sum()
+    )
+    assert result.observed_prompt_variance == pytest.approx(
+        unit.mean().groupby(level="step").var(ddof=1).mean()
+    )
+    assert "equal_weight_sampling_unit_generation" in result.assumptions
+    assert "independent_prompt_groups_per_step" not in result.assumptions
+
+
+def test_unit_generation_counts_units_with_finite_se():
+    from bench.synthetic import evaluate_fitted, generate_fitted
+
+    fits = fit(feature_names=["flag", "value"], sampling_units=units(UNEQUAL_UNITS))
+    batch = generate_fitted(fits, seed=123, n_replicates=2, n_steps=20, onset=10)
+    assert batch.trials.status.eq("generated").all()
+    assert batch.series.n_prompts.eq(2).all()
+    assert batch.series.n_rollouts.eq(64).all()
+    assert "n_sampling_units" not in batch.series
+    assert np.isfinite(batch.series.se).all()
+    assert "equal_weight_sampling_unit_generation" in batch.settings["assumptions"]
+    assert evaluate_fitted(batch).trials.scorable.all()
+
+
+def test_unit_fits_without_two_units_or_replicated_units_are_unavailable():
+    single = fit(sampling_units=units(["u0"] * 8))
+    assert single.fit_status.eq("unavailable").all()
+    assert single.reason.eq("insufficient_prompt_groups").all()
+    assert single.group_definition.eq("sampling_unit").all()
+    sparse = fixture(n_rollouts=1)
+    assert fit(sparse).reason.eq("insufficient_within_prompt_replication").all()
+    pooled = fit(sparse, sampling_units=units(EQUAL_UNITS))
+    assert pooled.fit_status.isin(["fit", "degenerate_binary"]).all()
+    lone = fit(sparse, sampling_units=units(["u0"] + ["u1"] * 7))
+    assert lone.reason.eq("insufficient_within_prompt_replication").all()
+
+
+def test_invalid_unit_map_is_rejected():
+    mapping = units(EQUAL_UNITS)
+    for invalid in [
+        mapping.iloc[:-1],
+        pd.concat([mapping, mapping.iloc[:1]]),
+        mapping.assign(extra=1),
+        mapping.assign(sampling_unit_id=""),
+    ]:
+        with pytest.raises(ValueError, match="sampling_units"):
+            fit(sampling_units=invalid)

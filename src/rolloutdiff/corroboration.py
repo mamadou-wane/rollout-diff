@@ -1,4 +1,4 @@
-"""Bounded event-window evidence, separate from first-alert replication."""
+"""Bounded event-window evidence for a sequential alert in sampling-unit halves."""
 
 from __future__ import annotations
 
@@ -81,17 +81,12 @@ def event_window_corroboration(
 ) -> EventWindowEvidence:
     """Find same-direction sustained witnesses near the full sequential alert.
 
-    The inclusive full-grid window runs from max(baseline_steps, alert_position
-    - radius) through alert_position + radius. Missing rows/SE break streaks.
-    Halves reuse fixed-window replication's original baseline and scoring rules.
-
-    A matching witness in each half corroborates despite gaps or a truncated tail.
-    Absence contradicts only in a complete, entirely scorable half window long
-    enough for a streak; any such contradiction determines the combined result.
-    Opposite/mixed witnesses do not disprove a possible match in unknown data.
-    Other missing evidence is unavailable. Witnesses locate blocks within the
-    window; half first-alert and global-onset times remain unspecified. Error
-    rates are uncalibrated.
+    Halves use fixed-window replication rules within ``radius`` full-grid
+    positions of the alert, after the baseline; streaks cannot span missing
+    rows or SE. A matching witness in each half corroborates. A half contradicts
+    only when its window is complete, fully scorable, and long enough for a
+    streak, and one contradicting half decides the result; anything else is
+    unavailable.
     """
     _validate_radius(radius)
     parameters = {
@@ -239,7 +234,6 @@ def _corroborate_half(
     direction,
     horizon_complete,
 ):
-    # Score the original baseline and bounded window for the local witness.
     coverage, result = _fixed_baseline_scores(
         series, steps[: resolved["baseline_steps"]] + window, resolved
     )

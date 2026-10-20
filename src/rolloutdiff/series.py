@@ -213,28 +213,45 @@ def _aggregate_sparse(
 def _sparse_prompt_errors(
     sparse_result: pd.DataFrame, prompt_counts: pd.DataFrame
 ) -> pd.DataFrame:
+    # Two passes: deviations of present prompts from the step mean, plus the
+    # absent prompts at zero. A one-pass sum of squares leaves roundoff where
+    # every prompt shares the same proportion.
+    keys = [*_STEPS, "feature"]
+    groups = sparse_result["n_prompts"].to_numpy(dtype=float)
     if prompt_counts.empty:
-        sparse_result["sum_p"] = sparse_result["sum_p2"] = 0.0
+        sparse_result["mean"] = 0.0
+        variance = np.zeros(len(sparse_result))
     else:
-        prompt_counts["p2"] = prompt_counts["p"] ** 2
         moments = (
-            prompt_counts.groupby([*_STEPS, "feature"], observed=True, sort=False)
-            .agg(sum_p=("p", "sum"), sum_p2=("p2", "sum"))
+            prompt_counts.groupby(keys, observed=True, sort=False)
+            .agg(sum_p=("p", "sum"), n_present=("p", "size"))
             .reset_index()
         )
         sparse_result = sparse_result.merge(
-            moments, on=[*_STEPS, "feature"], how="left", validate="one_to_one"
+            moments, on=keys, how="left", validate="one_to_one"
         )
-        sparse_result[["sum_p", "sum_p2"]] = sparse_result[["sum_p", "sum_p2"]].fillna(
-            0.0
+        sparse_result[["sum_p", "n_present"]] = sparse_result[
+            ["sum_p", "n_present"]
+        ].fillna(0.0)
+        sparse_result["mean"] = sparse_result["sum_p"].to_numpy() / groups
+        deviations = prompt_counts.merge(
+            sparse_result[[*keys, "mean"]], on=keys, validate="many_to_one"
         )
-    groups = sparse_result["n_prompts"].to_numpy(dtype=float)
-    first, second = (
-        sparse_result["sum_p"].to_numpy(),
-        sparse_result["sum_p2"].to_numpy(),
-    )
-    sparse_result["mean"] = first / groups
-    variance = np.maximum(second - first**2 / groups, 0.0)
+        deviations["d2"] = (deviations["p"] - deviations["mean"]) ** 2
+        residuals = (
+            deviations.groupby(keys, observed=True, sort=False)
+            .d2.sum()
+            .rename("present_d2")
+            .reset_index()
+        )
+        sparse_result = sparse_result.merge(
+            residuals, on=keys, how="left", validate="one_to_one"
+        )
+        absent = groups - sparse_result["n_present"].to_numpy()
+        variance = (
+            sparse_result["present_d2"].fillna(0.0).to_numpy()
+            + absent * sparse_result["mean"].to_numpy() ** 2
+        )
     sparse_result["se"] = np.sqrt(
         np.divide(
             variance,
@@ -341,8 +358,8 @@ def aggregate(
 
     Weight exact-prompt means equally. Default SE is SD / sqrt(prompt count);
     explicit units use CR1 SE of the same mean. Fewer than two units yields NaN;
-    measured zero variance stays zero. SE excludes detector floors. Small-unit
-    inference remains uncalibrated. Align features by (run, sample_id).
+    measured zero variance stays zero. SE excludes detector floors.
+    Align features by (run, sample_id).
     """
     rollouts = validate_rollouts(rollouts)
     dense_names = _validate_features(rollouts, features)

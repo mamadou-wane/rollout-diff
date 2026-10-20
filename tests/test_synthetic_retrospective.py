@@ -1,10 +1,4 @@
-"""Uncalibrated segmentation checks using synthetic baseline parameters.
-
-Reuse the sequential detector's large-shift generator with the same seeds
-and parameters. Measure retrospective localization against the planted
-boundary, independently of sequential alert delays, with a tolerance of
-two observations.
-"""
+"""Segmentation checks using synthetic baseline parameters."""
 
 import pytest
 from test_synthetic_detection import N_CASES, ONSET, controlled_series

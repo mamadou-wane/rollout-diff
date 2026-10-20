@@ -1,4 +1,4 @@
-"""Descriptive persistence and within-group reward evidence."""
+"""Persistence and within-group reward evidence."""
 
 from __future__ import annotations
 
@@ -63,9 +63,7 @@ def persistence(
     Retained means sign(change)*(mean-reference_mean) >= effect_fraction*abs(change).
     The returned threshold is an absolute mean cutoff. Fractions use evaluable
     logged observations, excluding unknown SE and reporting reduced coverage.
-    No tail or no evaluable rows yields no fraction. Sequential callers use the
-    alert step/mean/delta; retrospective callers must choose an anchor explicitly.
-    This is descriptive, without a pass threshold or confidence interval.
+    No tail or no evaluable rows yields no fraction.
     """
     frame = validate_series(series)
     frame = frame.loc[frame.run.eq(run) & frame.feature.eq(feature)].copy()
@@ -198,9 +196,8 @@ def reward_association(
     """Average present-minus-absent reward differences over mixed prompt/step groups.
 
     Window bounds are inclusive. Mixed groups have equal weight regardless of
-    completion count; pure groups remain in the detail table only. The caller
-    chooses the window. Continuous features return ``not_binary``. This descriptive
-    association has no causal interpretation or inferential SE.
+    completion count; pure groups remain in the detail table only.
+    Continuous features return ``not_binary``.
     """
     window = _window(window)
     frame, kind = feature_values(rollouts, features, run=run, feature=feature)

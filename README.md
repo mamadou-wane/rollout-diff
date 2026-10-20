@@ -3,15 +3,16 @@
 Deterministic analysis of behavioral shifts across RL training: rollout ingestion, static
 feature extraction, prompt-balanced aggregation, change detection, and supporting evidence.
 
-## Quick Start
+## Setup
 
 Requires Python 3.11+.
 
 ```sh
 python -m venv .venv
 .venv/bin/python -m pip install -e '.[test]'
-.venv/bin/python -m pytest
 ```
+
+## Usage
 
 ```python
 from rolloutdiff import analyze_rollouts, load_trl
@@ -24,150 +25,143 @@ print(analysis.evidence)
 print(analysis.sequential.screening)
 ```
 
-| Loader | Accepted Input | Schema Mapping |
+`evidence` has one row per feature series and `scalar:reward`, including non-alerting and
+unscorable series.
+
+| Loader | Accepted input | Schema mapping |
 | :--- | :--- | :--- |
-| `load_trl` | Completions dir, trainer output dir, or `completions_<step>.parquet` | Auto-selects `reward`; other reward columns require `reward_column` |
-| `load_verl` | Numeric `<step>.jsonl` files | Expects `input`, `output`, `score`, and `step` |
-| `from_table` | DataFrame | Maps canonical column names to source columns via `columns` dict |
+| `load_trl` | Completions dir, trainer output dir, or `completions_<step>.parquet` | Uses `reward_column` if given, else `reward` (TRL may log one column per reward function and no total); NaN rewards fail |
+| `load_verl` | `<step>.jsonl` or `step_<step>.jsonl`, optionally `.gz` | Maps `input`, `output`, `score`, and `step`; tested on a verl 0.9.1 dump shard. `score` is the summed `token_level_scores` unless the reward function returns its own `score` (DAPO's excludes the overlong penalty) |
+| `from_table` | DataFrame | Maps canonical column names to source columns via the `columns` dict |
 
-## Data and Feature Contracts
+## Input contracts
 
-* **Canonical Schema**: Rows require `run`, nonnegative integer `step`, `sample_id`,
-  `prompt_id`, `prompt`, `response`, and finite `reward`. `(run, sample_id)` must be unique.
-  Missing rewards fail; external labels are excluded.
-* **Identities**: `prompt_id` identifies exact prompt content within a run, including chat
-  roles and metadata. Adapters may generate content hashes; caller-provided IDs are supported.
-  Auto-generated `sample_id` values depend on filename and row position; pass explicit IDs if
-  reordering rows. Text, supported chat messages, and tool calls are preserved; unsupported
+* Rows require `run`, nonnegative integer `step`, `sample_id`, `prompt_id`, `prompt`,
+  `response`, and finite `reward`; `(run, sample_id)` must be unique. Unsupported message
   content fails.
-* **Preprocessing**: Complete `<think>` and `<thinking>` blocks are stripped before feature
-  extraction, while `resp_chars` measures raw unstripped length. Features declare a tier
-  (`structural` or `prose`) and kind (`binary` or `continuous`).
-* **Static Code Parsing**: Python fragments are parsed without execution. File-declaration
-  extraction supports balanced nested tags up to 64 scopes and ignores declarations in
-  literals or comments, across fence boundaries, or without closing tags. Complete children of
-  unclosed parents remain usable. Features indicate syntax, not execution.
-* **Vocabulary**: Selected across the full supplied dataset. Sparse tokens require $\ge 5\%$
-  prompt-balanced prevalence at some `(run, step)` and cap at $2{,}000$ tokens per tier
-  (lexical tie-breaking). Both limits are configurable.
+* `prompt_id` identifies exact prompt content within a run, including chat roles and
+  metadata. Generated `sample_id` values depend on file name and row position; pass explicit
+  IDs if rows may be reordered.
+* Each feature has a tier (`structural` or `prose`) and a kind (`binary` or `continuous`).
+  Complete `<think>` and `<thinking>` blocks are stripped first, and Python fragments are
+  parsed without execution. Python 3.11 rejects f-strings with a backslash in the expression
+  part (PEP 701), so a few rollouts per public run lose AST features there
+  (`code_parse_fail`); pinned local values assume 3.12 or later.
+* The sparse vocabulary is selected over the full dataset: a token needs $\ge 5\%$
+  prompt-balanced prevalence at some `(run, step)`, capped at $2{,}000$ tokens per tier.
 
-## Aggregation and Uncertainty
+## Aggregation and uncertainty
 
-At each step, completions are averaged within each exact `prompt_id`, and prompts are weighted
-equally. Absent sparse features contribute $0$; uncomputable uncertainty remains missing.
-Joins use rollout identities, and schedules retain prompt IDs and completion counts.
-
-An optional `sampling_units` DataFrame maps `(run, prompt_id)` to a nonblank
-`sampling_unit_id` (1-to-1 coverage required; defaults to one unit per prompt). Grouping
-related prompt variants into a shared unit clusters standard errors without altering canonical
-prompt IDs or point-estimate weights.
-
-For $P$ prompt means $x_p$, $U$ sampling units, and step mean $\mu = \text{mean}(x_p)$, the
-cluster-robust (CR1) standard error is:
+Each step averages completions within each exact `prompt_id` and weights prompts equally;
+absent sparse features count as $0$. An optional `sampling_units` DataFrame maps every
+`(run, prompt_id)` to a `sampling_unit_id` (default: one unit per prompt). Units cluster
+standard errors and keep related prompts in the same replication half without changing point
+estimates. For $P$ prompt means $x_p$ with mean $\mu$ and $U$ units, the CR1 standard error is:
 
 $$S_u = \sum_{p \in u} (x_p - \mu), \qquad \text{SE} = \frac{1}{P}\sqrt{\frac{U}{U - 1} \sum_{u=1}^{U} S_u^2}$$
 
-When $U = P$, $\text{SE}$ reduces to $\text{SD} / \sqrt{P}$. Steps with $U < 2$ yield
-unavailable $\text{SE}$ (small $U$ remains noisy); zero measured variance yields $0$.
+Steps with $U < 2$ have unavailable $\text{SE}$.
 
-`analyze_rollouts` builds one vocabulary, aggregates the full run and two whole-unit halves
-(`crc32(unit_id.encode("utf-8")) & 1`) once, and screens all retained features plus `reward`.
-It outputs `evidence` (including non-alerting and unscorable series) and detail tables:
-`replication_halves`, `corroboration_halves`, `persistence_steps`, `reward_groups`,
-`prompt_values`, `prompt_shifts`, and `half_assignments`.
+## Change detectors
 
-## Change Detectors
+**Sequential (`detect_sequential`)**: The first $B = 15$ observed steps freeze the baseline
+mean and $\text{scale} = \max(\text{baseline SD}, \text{median baseline SE}, 10^{-9})$. An
+alert needs $3$ consecutive logged steps in one direction with $|z| > 4$ (continuous), or $z > 4$ and
+a prevalence rise $\ge 0.10$ (binary). Missing baseline $\text{SE}$ makes a series
+unscorable; missing monitoring $\text{SE}$ resets the streak. A baseline with no measurable
+variance is flagged `numerical_floor_dominant`, and its alerts depend on input units.
 
-### Sequential (`detect_sequential`)
+**Retrospective (`detect_retrospective`)**: Selects the best single $L_2$ mean-shift split
+with $\ge 5$ steps per segment when
+$\text{SSE}_{\text{null}} - \text{SSE}_{\text{split}} > 3 \log(n) \cdot \max(\text{SSE}_{\text{split}} / (n - 2), \text{mean}(\text{SE}^2))$
+and the absolute shift is $\ge 0.10$ (binary) or $\ge 0$ (continuous). `changepoint_step` starts the
+right segment. With `dependence="ar1"` (default) the split is kept only if a stationary AR(1)
+covariance plus measurement variance, profiled separately under the constant and split mean
+models, gives $2\Delta\ell > 3 \log(n)$ with the same GLS direction; exact piecewise-constant
+zero-SE splits stay selected as `exact_zero_variance_unconfirmed`. Binary series with a
+mixed step use quasi-binomial measurement variance $\phi\, m(1-m)/U_t$ at segment mean $m$;
+other series use measured $\text{SE}^2$. Missing $\text{SE}$ makes a series unscorable.
 
-Freezes the first $B = 15$ observed step means in logged order and scores subsequent steps
-using:
+## Supporting evidence
 
-$$\text{scale} = \max(\text{baseline SD}, \text{median baseline SE}, 10^{-9}), \qquad z = \frac{\text{step mean} - \text{baseline mean}}{\text{scale}}$$
+Evidence anchors on the sequential alert: reward association and prompt mix use streak onset
+through alert, and persistence uses later steps. Retrospective-only changes have no anchored
+evidence.
 
-* **Alert Rules**: Requires $3$ consecutive steps in the same direction with $|z| > 4$
-  (continuous) or $z > 4$ and mean increase $\ge 0.10$ within $4\epsilon_{\text{float64}}$
-  (binary).
-* **State Resets**: Missing baseline $\text{SE}$ marks a series unscorable. Sub-threshold
-  steps, sign flips, or missing monitoring $\text{SE}$ reset the streak. Current-step
-  $\text{SE}$ never alters the frozen `scale`. Only the first alert is emitted; later scores
-  remain available. Near-zero variance dominated by the $10^{-9}$ floor depends on input
-  units.
-
-### Retrospective (`detect_retrospective`)
-
-Finds the best single $L_2$ mean-shift split (`changepoint_step` starts the right segment)
-with $\ge 5$ steps per segment. Squared costs are normalized; missing $\text{SE}$ is
-unscorable.
-
-1. **$L_2$ Screen**: Requires
-   $\text{SSE}_{\text{null}} - \text{SSE}_{\text{split}} > 3 \log(n) \cdot \max(\text{SSE}_{\text{split}} / (n - 2), \text{mean}(\text{SE}^2))$
-   and an absolute shift $\ge 0.10$ (binary) or $\ge 0$ (continuous, default) on the winning
-   split.
-2. **AR(1) Confirmation (`dependence="ar1"`, default)**: Profiles both constant-mean and
-   split-mean models over a stationary latent AR(1) covariance plus measured step
-   $\text{SE}^2$ (no diagonal jitter). Confirms the fixed $L_2$ boundary if
-   $2\Delta\ell > 3 \log(n)$ with matching GLS sign. Pass `dependence="independent"` to skip
-   AR(1) profiling. Exact piecewise-constant zero-$\text{SE}$ series return
-   `exact_zero_variance_unconfirmed`.
-   * **Grid**: $\rho \in (-0.95, -0.5, 0, 0.5, 0.8, 0.95, 0.99)$; latent variance multiplies
-     $\max(\text{sample variance}, \text{mean}(\text{SE}^2))$ by
-     $(2^{-16}, 2^{-12}, 2^{-8}, 2^{-6}, 2^{-4}, 2^{-2}, 1, 4)$, plus $0$ when all
-     $\text{SE} > 0$.
-
-## Supporting Evidence and Limitations
-
-Integrated evidence anchors on sequential alerts (reward and prompt mix evaluate streak onset
-through alert; persistence evaluates post-alert; retrospective-only changes leave integrated
-evidence unavailable).
-
-| Metric | Definition | Edge Cases |
+| Metric | Definition | Edge cases |
 | :--- | :--- | :--- |
-| `split_half_replication` | Both halves alert in the same direction as the full run within a span of $10$ full-grid steps. | `contiguous_prefix` (default) stops at the first gap. `fixed_window` requires $\ge \max(2, \lceil B/2 \rceil)$ finite-$\text{SE}$ baseline steps and resumes after gaps (earlier hidden compatible alerts mark the first alert unavailable). Opposing alerts fail. |
-| `event_window_corroboration` | Sustained $3$-step same-direction streak in both halves within radius $10$ of the full alert (post-baseline, using `fixed_window`). | Streaks cannot span gaps. Contradicts only if a non-matching window is complete and scorable; otherwise unavailable. Discloses opposite/mixed witnesses. |
-| `persistence` | Post-anchor fraction of evaluable steps retaining $\ge 50\%$ of the initial signed shift. | Missing future steps yield no estimate; step coverage is reported separately. |
-| `reward_association` | Equal-weighted present-minus-absent reward delta across mixed `(run, step, prompt_id)` groups. | Coverage includes pure groups. Continuous features return `not_binary`. |
-| `prompt_mix` | Compares disjoint windows: binary breadth (distinct post-window positive prompts) and paired shared change (CR1 $\text{SE}$ by sampling unit). | No shared prompts yields no estimate. Includes length KS distance, keyword prevalence, and optional difficulty-tag total variation. |
+| `split_half_replication` | Both whole-unit halves alert in the full run's direction within $10$ full-grid steps. | `contiguous_prefix` (default) stops at the first gap; `fixed_window` resumes after gaps. An unavailable-$\text{SE}$ row that could hide an earlier alert makes the half unavailable. |
+| `event_window_corroboration` | A $3$-step same-direction streak in both halves within $10$ steps of the full alert. | Contradicts only in a complete, scorable window; otherwise unavailable. |
+| `persistence` | Fraction of later evaluable steps keeping $\ge 50\%$ of the alert-step shift. | No evaluable later step gives no estimate. |
+| `reward_association` | Equal-weighted present-minus-absent reward difference over mixed `(run, step, prompt_id)` groups. | Continuous features return `not_binary`. |
+| `prompt_mix` | Positive-prompt breadth and paired change on shared prompts between disjoint windows. | No shared prompts gives no estimate. |
 
-**Limitations**: Error rates are uncalibrated, and results do not establish causality or rank
-mechanisms. Full-data vocabulary selection, sparse baselines, small unit counts $U$, temporal
-dependence, and transient shifts constrain interpretation.
+## Limitations
 
-## Benchmarks and Verification
+* Error rates are uncalibrated. Results do not establish causality or rank mechanisms;
+  lexical indicators, reward association, and prompt mix are descriptive.
+* Full-run vocabulary selection is retrospective, and benchmarks score fixed,
+  retrospectively selected targets.
+* Few sampling units make $\text{SE}$ noisy, and sparse baselines make the sequential scale
+  noisy.
+* AR(1) confirmation lowers null selections under step dependence and loses power on small
+  shifts; `bench.dependence_study` measures both. The binary variance assumes equal unit
+  sizes; unequal sizes raise the true variance by $U_t \sum_u (P_u/P)^2$, at most $1.04$ on
+  the AISI schedules.
+* The retrospective detector fits one sustained shift and is sensitive to outliers and
+  transient shifts.
 
-Generated data and outputs remain outside the repository. Benchmarks test fixed,
-retrospectively selected targets rather than open-ended discovery.
+## Benchmarks
 
-* **Public & Restricted Data (`bench/public_manifest.json`)**: Pins $4$ dataset revisions and
-  $118$ Parquet files by size and SHA-256 before decoding (no network downloads). AISI dataset
-  cards declare Apache-2.0; underlying problem materials may have separate terms. `Aria` and
-  `TRL` have unresolved licensing and must not be redistributed. Missing rewards or responses
-  drop the entire batch (`AISI2` drops step $403$). `TRL` uses one prompt per step
-  ($\text{SE}$ unavailable).
-* **Synthetic Plant**: Fits baseline windows using beta-binomial or Gaussian prompt variation
-  plus stationary AR(1) step noise, reporting sequential delay and retrospective boundary
-  error under fixed seeds and effect sizes.
-* **External Baselines (`bench/external_manifest.json`)**: Wraps pinned `rlprobe`, `rldoctor`,
-  and `CHERRL`/`RHDA` files under `--external-root` (rejects unlisted Python/bytecode files,
-  approximates tokens as $\text{chars}/4$).
+Benchmark inputs and outputs stay outside the repository.
+
+* `bench/public_manifest.json` pins $4$ dataset revisions and $118$ Parquet files by size and
+  SHA-256; nothing is downloaded. AISI cards declare Apache-2.0, but the underlying problem
+  materials may carry other terms. Aria and TRL licensing is unresolved; do not redistribute
+  them. Steps with a missing reward or response are dropped whole (AISI2 loses step $403$).
+  TRL has one prompt per step, so every series is unscorable and only label attribution is
+  evaluated. `--external-root` adds the pinned `rlprobe`, `rldoctor`, and `CHERRL`/`RHDA`
+  baselines from `bench/external_manifest.json`.
+* `bench.run_local` fits Aria steps $1$ to $15$ (and AISI with `--public-root`), plants
+  $+0.20$ prevalence or $+2$ rollout-level SD shifts at step $40$ of $80$, and scores each
+  detector on its
+  pooled non-degenerate profiles: $\ge 95\%$ of planted shifts found within $5$ steps (alert
+  delay or boundary error) and $\le 0.5\%$ of no-change series flagged.
 
 ```sh
-# Public and local benchmarks (--verify-only checks hashes without running analysis)
-PYTHONPATH=src .venv/bin/python -m bench.public_benchmark \
+# --verify-only checks the pins without running analysis
+.venv/bin/python -m bench.public_benchmark \
   --data-root /path/to/data --run aisi0 --output /tmp/aisi0.json
-PYTHONPATH=src .venv/bin/python -m bench.sparse_replication \
+.venv/bin/python -m bench.sparse_replication \
   --data-root /path/to/data --run aisi2 --output /tmp/halves.json
-PYTHONPATH=src .venv/bin/python -m bench.run_local \
+.venv/bin/python -m bench.run_local \
   --aria /path/to/aria.parquet --output /tmp/fitted.json
-PYTHONPATH=src .venv/bin/python -m bench.dependence_study \
+.venv/bin/python -m bench.dependence_study \
   --aria /path/to/aria.parquet --output /tmp/dependence.json
-
-# Integration tests and linting
-ROLLOUTDIFF_ARIA_PATH=/path/to/aria.parquet \
-ROLLOUTDIFF_FULL_ARIA=1 \
-ROLLOUTDIFF_TRL_DIR=/path/to/trl_sunshine \
-ROLLOUTDIFF_EXTERNAL_SOURCES=/path/to/snapshots \
-  .venv/bin/python -m pytest
-
-ruff format --check src bench tests && ruff check src bench tests
 ```
+
+## Verification
+
+```sh
+.venv/bin/python -m pip install -c .github/ci-constraints.txt ruff
+.venv/bin/ruff format --check src bench tests
+.venv/bin/ruff check src bench tests
+.venv/bin/python -m pytest -q -m 'not local_data'
+
+# Local data for the full suite and the acceptance checks
+export ROLLOUTDIFF_ARIA_PATH=/path/to/aria.parquet \
+  ROLLOUTDIFF_FULL_ARIA=1 \
+  ROLLOUTDIFF_TRL_DIR=/path/to/trl_sunshine \
+  ROLLOUTDIFF_PUBLIC_ROOT=/path/to/data \
+  ROLLOUTDIFF_VERL_SHARD=/path/to/step_000001.jsonl.gz \
+  ROLLOUTDIFF_EXTERNAL_SOURCES=/path/to/snapshots
+.venv/bin/python -m pytest -q
+
+# Acceptance checks
+.venv/bin/python -m pytest -q -m local_data tests/test_aria_full_pipeline.py tests/test_public_runs.py \
+  -k "acceptance or named_target or detection_unscorable"
+```
+
+The acceptance tests are ordinary assertions;
+`test_local_retrospective_meets_synthetic_acceptance` fails while the retrospective detector
+misses its thresholds.

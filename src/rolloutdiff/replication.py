@@ -110,17 +110,14 @@ def split_half_replication(
 ) -> ReplicationEvidence:
     """Compare first full/half alerts using whole-unit CRC32 & 1 splits.
 
-    All three first alerts must agree in direction and span at most ``tolerance``
-    full-grid positions. Each half uses the full detector's parameters and stops
-    at the full alert plus tolerance. ``contiguous_prefix`` stops at its first gap.
-    ``fixed_window`` keeps finite-SE rows from the original baseline, requiring
-    max(2, ceil(baseline_steps/2)); monitoring resumes after gaps with reset streaks.
-    A possible hidden earlier alert makes a later observed first alert ambiguous.
-
-    Observed disagreement is failure. Otherwise missing evidence is unavailable;
-    a scorable no-alert half is negative only after the horizon is complete,
-    and pending before then. No full alert makes no replication claim.
-    These availability-conditioned stability checks have no calibrated error rate.
+    Replication needs all three first alerts in one direction within
+    ``tolerance`` full-grid positions; observed disagreement fails regardless
+    of the other half. A scorable half without an alert stays
+    ``pending`` until that horizon is complete, and an unavailable-SE row that
+    could hide an earlier compatible alert makes the half unavailable.
+    ``contiguous_prefix`` stops a half at its first gap; ``fixed_window`` needs
+    max(2, ceil(``baseline_steps``/2)) finite-SE baseline rows and resumes after
+    gaps.
     """
     _validate_coverage_policy(coverage_policy)
     if type(tolerance) is not int or tolerance < 0:
@@ -154,7 +151,6 @@ def split_half_replication(
 
 
 def _prepare_halves(rollouts, features, *, run, feature, sampling_units, parameters):
-    """Prepare shared whole-unit aggregates for replication and corroboration."""
     units = resolve_sampling_units(rollouts, sampling_units)
     frame, kind = feature_values(rollouts, features, run=run, feature=feature)
     units = subset_sampling_units(units, frame)
@@ -531,14 +527,32 @@ def _contiguous_half(
         row[name] = diagnostic[name] if diagnostic is not None else None
     if not result.alerts.empty:
         half_alert = result.alerts.iloc[0]
-        row.update(
-            status="alerted",
-            alert_step=int(half_alert.alert_step),
-            onset_step=int(half_alert.onset_step),
-            direction=half_alert.direction,
-            alert_position=positions[half_alert.alert_step],
-            reason="first_alert_observed",
-        )
+        # An unavailable-SE row before the observed alert could have completed
+        # an earlier compatible streak, so the first alert is then unknown.
+        resolved = _detector_parameters(parameters)
+        monitor_grid = required_steps[resolved["baseline_steps"] : prefix_end]
+        signs = {
+            int(point.step): int(point.direction)
+            for point in result.scores.loc[
+                result.scores.step.isin(monitor_grid)
+            ].itertuples()
+            if np.isfinite(point.se)
+        }
+        allowed_signs = (1,) if series.kind.iloc[0] == "binary" else (-1, 1)
+        possible = _scan_first_alerts(
+            signs, monitor_grid, resolved["sustain"], allowed_signs
+        )["first_possible_alert_step"]
+        if possible != int(half_alert.alert_step):
+            row["reason"] = "ambiguous_first_alert"
+        else:
+            row.update(
+                status="alerted",
+                alert_step=int(half_alert.alert_step),
+                onset_step=int(half_alert.onset_step),
+                direction=half_alert.direction,
+                alert_position=positions[half_alert.alert_step],
+                reason="first_alert_observed",
+            )
     elif missing:
         row["reason"] = "missing_step_grid"
     elif source_status in (

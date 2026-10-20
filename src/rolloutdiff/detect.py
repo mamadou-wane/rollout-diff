@@ -1,4 +1,4 @@
-"""Sequential sustained-z screening with one baseline scale policy."""
+"""Sequential sustained-z screening against a frozen baseline scale."""
 
 from __future__ import annotations
 
@@ -70,17 +70,11 @@ def detect_sequential(
 ) -> DetectionResult:
     """Return the first sustained alert and all screening scores per series.
 
-    The first ``baseline_steps`` rows fix the mean and
-    scale = max(sample SD, median prompt SE, numerical_floor).
-    Binary crossings require z > threshold and delta >= minimum change;
-    continuous crossings require abs(z) > threshold. Four float64 epsilons
-    accommodate binary effect roundoff. Crossings must share a direction for
-    ``sustain`` consecutive logged observations, allowing sparse step IDs.
-
-    Missing baseline SE makes a series unscorable; missing monitoring SE resets
-    its streak. Current-step SE leaves the divisor unchanged. Guard-dominated
-    scores depend on input units. Error rates are uncalibrated, and full-run
-    vocabulary selection remains retrospective.
+    The first ``baseline_steps`` observed rows freeze the mean and the scale,
+    max(sample SD, median baseline SE, ``numerical_floor``). Binary series alert
+    only on rises of at least ``min_prevalence_change``. Missing baseline SE
+    makes a series unscorable; missing monitoring SE resets the streak. Streaks
+    count logged rows, ignoring step gaps.
     """
     if type(baseline_steps) is not int or baseline_steps < 2:
         raise ValueError("baseline_steps must be an integer of at least two")
@@ -160,6 +154,7 @@ def _monitoring_scores(
     except FloatingPointError:
         raise ValueError("numerical overflow computing screening scores") from None
     if kind == "binary":
+        # Allow float64 roundoff so an exact minimum change qualifies.
         effect_met = delta >= min_prevalence_change - 4 * np.finfo(float).eps
         qualifies = valid & (z > z_threshold) & effect_met
     else:

@@ -129,3 +129,44 @@ def test_metric_summary_does_not_hide_misses_or_confuse_detection_with_localizat
     assert row["n_trials"] == 3 and row["n_detected"] == 2 and row["n_localized"] == 1
     assert row["detection_rate"] == 2 / 3 and row["localization_rate"] == 1 / 3
     assert row["mean_absolute_error"] == 7 and row["mean_boundary_error"] == 5
+
+
+def test_oracle_arms_use_the_generating_covariance_and_detector_penalty():
+    from bench.dependence_study import evaluate_pair, make_scenario
+
+    source = fit()
+    planted = make_scenario(
+        source, rho=0.9, sampling_multiplier=1.0, seed=11, n_replicates=6, effect_sd=2.0
+    )
+    rows = evaluate_pair(planted, "test", oracle=source)
+    assert set(rows.method) == {
+        "independent",
+        "ar1",
+        "oracle_boundary",
+        "oracle_search",
+    }
+    search = rows.loc[rows.method.eq("oracle_search")]
+    assert search.detected.all() and search.localized.all()
+    assert search.detector_reason.eq("generating_covariance").all()
+    boundary = rows.loc[rows.method.eq("oracle_boundary")]
+    independent = rows.loc[rows.method.eq("independent")].set_index("replicate")
+    for row in boundary.itertuples():
+        assert row.scorable == (independent.loc[row.replicate, "flagged"] or True)
+        if independent.loc[row.replicate, "flagged"]:
+            assert (
+                row.candidate_step == independent.loc[row.replicate, "candidate_step"]
+            )
+    null = evaluate_pair(
+        make_scenario(
+            source,
+            rho=0.9,
+            sampling_multiplier=1.0,
+            seed=12,
+            n_replicates=6,
+            effect_sd=0.0,
+        ),
+        "test",
+        oracle=source,
+    )
+    assert not null.loc[null.method.eq("oracle_boundary"), "detected"].any()
+    assert evaluate_pair(planted, "test").method.isin(["independent", "ar1"]).all()

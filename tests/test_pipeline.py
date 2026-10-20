@@ -28,7 +28,6 @@ def test_ingestion_to_prompt_balanced_evidence(tmp_path):
     assert definitions.n_prompts.tolist() == [2, 2]
     assert result.prompt_schedule.n_rollouts.tolist() == [3, 1, 1, 1]
     assert "label_hack" not in features.catalog.feature.tolist()
-    # Parquet round-tripping preserves the estimator output.
     path = tmp_path / "series.parquet"
     result.series.to_parquet(path, index=False)
     pd.testing.assert_frame_equal(pd.read_parquet(path), result.series)

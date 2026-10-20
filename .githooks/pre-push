@@ -6,7 +6,7 @@ python=.venv/bin/python
 export PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 unset PYTEST_ADDOPTS PYTEST_PLUGINS
 unset ROLLOUTDIFF_ARIA_PATH ROLLOUTDIFF_TRL_DIR ROLLOUTDIFF_FULL_ARIA
-unset ROLLOUTDIFF_EXTERNAL_SOURCES ROLLOUTDIFF_METRICS_PATH
+unset ROLLOUTDIFF_EXTERNAL_SOURCES ROLLOUTDIFF_METRICS_PATH ROLLOUTDIFF_PUBLIC_ROOT
 
 echo "pre-push: running fast tests (local datasets and external snapshots excluded)"
 if ! "$python" -m pytest -q -m 'not local_data' -p no:cacheprovider; then

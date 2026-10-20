@@ -11,11 +11,7 @@ from rolloutdiff.series import aggregate
 
 pytestmark = pytest.mark.local_data
 
-# Policy: one globally SSE-minimizing mean split,
-# at least five observations per side, variance=max(split SSE/(n-2), mean(SE^2)),
-# SSE gain > 3*log(n)*variance, and binary absolute mean change >= .10.
 # These literal results come from exhaustive direct residual calculations below.
-# Detection accuracy and calibration are unmeasured by these named-series checks.
 _EXPECTED = {
     "call:bisect.bisect_left": {
         "status": "no_change",
@@ -145,7 +141,6 @@ def test_local_aria_direct_reference(aria_reference):
                 assert actual == pytest.approx(value)
             else:
                 assert actual == value
-    # The weak candidate fails both the fit-improvement and magnitude policies.
     weak = aria_reference["call:bisect.bisect_left"]
     assert weak["sse_gain"] < weak["penalty"]
     assert abs(weak["delta"]) < 0.10
@@ -225,7 +220,6 @@ def test_local_aria_retrospective_is_distinct_from_sequential(
     changes = aria_retrospective.changepoints.set_index("feature")
     assert changes.loc["def:run_tests", "changepoint_step"] == 117
     assert changes.loc["scalar:reward", "changepoint_step"] == 118
-    # Full-series boundaries and causal monitoring times answer different questions.
     assert (
         changes.loc["def:run_tests", "changepoint_step"]
         != alerts.loc["def:run_tests", "onset_step"]

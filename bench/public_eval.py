@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from rolloutdiff._sampling import resolve_sampling_units
 from rolloutdiff.features import FeatureTables
 from rolloutdiff.series import aggregate
 
@@ -137,7 +138,11 @@ def scalar_baselines(
     *,
     sampling_units: pd.DataFrame | None = None,
 ) -> dict:
-    """Use the engine's prompt-balanced estimator for four trainer scalars."""
+    """Use the engine's prompt-balanced estimator for five trainer scalars.
+
+    Zero reward variance is measured per exact prompt group and, with supplied
+    units, per source group; each rollout carries its group's indicator.
+    """
     maximum = float(rollouts.reward.max())
     dense = (
         rollouts[_KEYS]
@@ -182,6 +187,28 @@ def scalar_baselines(
                 "kind": "binary",
             }
         )
+    name = "scalar:zero_var_source_group_frac"
+    if sampling_units is None:
+        unavailable[name] = "sampling_units_not_supplied"
+    else:
+        source_keys = ["run", "step", "sampling_unit_id"]
+        source = rollouts[[*_KEYS, "step", "prompt_id", "reward"]].merge(
+            resolve_sampling_units(rollouts, sampling_units),
+            on=["run", "prompt_id"],
+            validate="many_to_one",
+        )
+        source_groups = source.groupby(source_keys).reward.agg(["size", "std"])
+        if source_groups["size"].lt(2).any():
+            unavailable[name] = "singleton_source_group"
+        else:
+            source_groups[name] = source_groups["std"].eq(0).astype(float)
+            zero = source.merge(
+                source_groups[[name]].reset_index(),
+                on=source_keys,
+                validate="many_to_one",
+            )
+            dense = dense.merge(zero[[*_KEYS, name]], on=_KEYS, validate="one_to_one")
+            metadata.append({"feature": name, "tier": "structural", "kind": "binary"})
     tables = FeatureTables(
         dense, pd.DataFrame(columns=[*_KEYS, "feature"]), pd.DataFrame(metadata)
     )

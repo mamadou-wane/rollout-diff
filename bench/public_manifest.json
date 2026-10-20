@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "verified_date": "2026-10-17",
-  "verification": "Every local parquet size and SHA256 matches the corresponding HF LFS oid at the pinned dataset revision. Metadata only was fetched; no rollout files downloaded.",
+  "verification": "Every local Parquet size and SHA-256 matches the Hugging Face LFS pointer at the pinned dataset revision. Only metadata was fetched.",
   "all_four_licensed": false,
   "runs": {
     "aria": {
@@ -13,8 +13,9 @@
         "identifier": "other",
         "evidence_url": "https://huggingface.co/datasets/gutenbergpbc/aria-reward-hacking/blob/a564b502e190158a14bbec2c7a43bd498daf320f/README.md",
         "evidence_sha256": "e889688857d84e3ec1aa8908e1f4b1c93b2961c9e3e843ad3b5c9a2dbe2e9b9a",
-        "note": "Pinned card explicitly asserts no open-source license; upstream training repository has no repository-level license. Local research analysis only in this reproduction; no redistributed data or automatic fetch."
+        "note": "Pinned card explicitly asserts no open-source license; upstream training repository has no repository-level license. Used for local research analysis only; never redistributed or fetched automatically."
       },
+      "attribution": "Gutenberg PBC reproduction of the Aria reward-hacking GRPO run (training code ariahw/rl-rewardhacking at 73695ff5); not an official release by the original authors.",
       "expected_rows": 51200,
       "expected_steps": 200,
       "files": [
@@ -39,6 +40,7 @@
         "evidence_sha256": "f151e9cf3f6eeeec4e711498605001aa383beb83a6ee3de80b993f641f3b872f",
         "note": "Pinned dataset card declares Apache-2.0; no standalone LICENSE file in the dataset tree. Underlying CodeContests problem materials have separate notices and terms."
       },
+      "attribution": "UK AI Security Institute, mt-somo project; the card asks to cite the paper \"Natural Emergent Misalignment from Reward Hacking\" and the dataset repository.",
       "expected_rows": 25664,
       "expected_steps": 401,
       "files": [
@@ -63,6 +65,7 @@
         "evidence_sha256": "d2f0844e84f9babb59be69b33e9a60718352fef23fad72c34c3ac29eb98fe1db",
         "note": "Pinned dataset card declares Apache-2.0; no standalone LICENSE file in the dataset tree. Underlying CodeContests problem materials have separate notices and terms."
       },
+      "attribution": "UK AI Security Institute, mt-somo project; the card asks to cite the paper \"Natural Emergent Misalignment from Reward Hacking\" and the dataset repository.",
       "expected_rows": 25792,
       "expected_steps": 403,
       "files": [
@@ -85,8 +88,9 @@
         "identifier": null,
         "evidence_url": "https://huggingface.co/datasets/sunshineNew/rh_qwen3_8b_prompted_v2_completions/blob/ced620589baed78b0453e7015b8dfe443bd1eaab/README.md",
         "evidence_sha256": "789c72dd0f169a7679eb73ec8c84cb8461030b9d296acc0fc907ec6ba1c49d9d",
-        "note": "Pinned card and complete repository tree contain no license declaration or LICENSE file. TRL software licensing does not establish rights to these completions/prompts."
+        "note": "Pinned card and complete repository tree contain no license declaration or LICENSE file. TRL's software license does not establish rights to these completions or prompts."
       },
+      "attribution": "TRL completion log published by sunshineNew (rh_qwen3_8b_prompted_v2); the card names no author, paper or citation.",
       "expected_rows": 3680,
       "expected_steps": 115,
       "files": [
@@ -910,8 +914,8 @@
       "source": "google-deepmind/code_contests",
       "revision": "fa7a4f8139aab08362503f3344778eb86901709a",
       "url": "https://github.com/google-deepmind/code_contests/blob/fa7a4f8139aab08362503f3344778eb86901709a/README.md#license",
-      "note": "Code Apache-2.0; non-code CC-BY-4.0; explicit third-party Codeforces, Description2Code MIT, and CodeNet Apache-2.0 notices. This is contextual source evidence, not verification of the exact AISI underlying problem revision."
+      "note": "Code Apache-2.0; non-code CC-BY-4.0; explicit third-party Codeforces, Description2Code MIT, and CodeNet Apache-2.0 notices. Context only; it does not verify the exact underlying problem revision AISI used."
     }
   ],
-  "public_reuse_policy": "No bundled or automatically fetched data. Aria and TRL are optional user-supplied local inputs with unresolved licensing. AISI dataset cards declare Apache-2.0; exact underlying problem revision and third-party permissions are not established by that declaration."
+  "public_reuse_policy": "No data is bundled or fetched automatically. Aria and TRL are optional user-supplied local inputs with unresolved licensing. AISI cards declare Apache-2.0, which does not establish the exact underlying problem revision or third-party permissions."
 }

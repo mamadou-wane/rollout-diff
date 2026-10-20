@@ -167,7 +167,7 @@ def test_zero_latent_variance_is_only_profiled_when_measurement_covariance_is_no
         ([0.0] * 10 + [1.0] * 10, 10.0, "penalty"),
     ],
 )
-def test_covariance_confirmation_cannot_add_a_legacy_rejection(values, errors, reason):
+def test_independent_rejection_skips_covariance_confirmation(values, errors, reason):
     diag = detect_retrospective(
         series(values, se=errors, kind="binary")
     ).diagnostics.iloc[0]
@@ -189,7 +189,7 @@ def test_unavailable_uncertainty_does_not_become_no_change_under_covariance_conf
     assert_frame_equal(frame, saved)
 
 
-def test_independent_mode_preserves_original_penalized_fit_fields_and_decisions():
+def test_independent_mode_reports_penalized_fit_fields_and_decisions():
     diag = detect_retrospective(
         series([0.0] * 10 + [1.0] * 10, se=0.1), dependence="independent"
     ).diagnostics.iloc[0]
@@ -271,3 +271,88 @@ def test_heteroskedastic_rejection_does_not_claim_temporal_dependence():
     assert diag.covariance_alternative_tau_variance_scaled == 0
     assert diag.covariance_status == "not_confirmed"
     assert diag.reason == "covariance_not_confirmed"
+
+
+def test_quasi_binomial_errors_pool_dispersion_and_follow_segment_means():
+    from rolloutdiff._dependence import quasi_binomial_errors
+
+    prevalence = np.array([0.0, 0.0, 0.25, 0.5, 0.5, 1.0])
+    errors = np.array([0.0, 0.0, 0.3, 0.1, 0.2, 0.0])
+    units = np.array([2.0, 4.0, 4.0, 16.0, 3.0, 5.0])
+    means = np.array([0.0, 0.0, 0.4, 0.4, 0.4, 0.4])
+    mixed = slice(2, 5)
+    freedom = units[mixed] - 1
+    dispersion = np.sum(freedom * units[mixed] * errors[mixed] ** 2) / np.sum(
+        freedom * prevalence[mixed] * (1 - prevalence[mixed])
+    )
+    modelled = quasi_binomial_errors(prevalence, errors, units, means)
+    np.testing.assert_allclose(
+        modelled, np.sqrt(dispersion * means * (1 - means) / units)
+    )
+    assert modelled[:2].tolist() == [0.0, 0.0] and modelled[5] > 0
+    unanimous = np.array([0.0, 0.0, 1.0, 1.0])
+    assert quasi_binomial_errors(unanimous, unanimous * 0, units[:4], unanimous) is None
+    with pytest.raises(FloatingPointError):
+        quasi_binomial_errors(
+            np.array([0.5, 0.5]),
+            np.array([1e-200, 0.1]),
+            np.array([4.0, 4.0]),
+            means[:2],
+        )
+
+
+def test_binary_confirmation_models_errors_and_continuous_keeps_step_se():
+    from rolloutdiff._dependence import confirm_ar1, quasi_binomial_errors
+
+    values = np.r_[np.zeros(10), np.full(10, 0.5)]
+    errors = np.r_[np.zeros(10), np.tile([0.05, 0.1], 5)]
+    frame = series(values, se=errors, kind="binary")
+    frame["n_sampling_units"] = np.r_[np.full(10, 16), np.full(10, 4)]
+    diag = detect_retrospective(frame).diagnostics.iloc[0]
+    assert diag.covariance_measurement == "quasi_binomial_se"
+    scale = diag.normalization_scale
+    units = frame.n_sampling_units.to_numpy(dtype=float)
+    null = quasi_binomial_errors(values, errors / scale, units, np.full(20, 0.25))
+    split = quasi_binomial_errors(
+        values, errors / scale, units, np.r_[np.zeros(10), np.full(10, 0.5)]
+    )
+    expected = confirm_ar1(values / scale, null, 10, 3.0, alternative_errors=split)
+    assert diag.covariance_gain == expected["covariance_gain"]
+    # Split-model errors vanish on the zero segment, so its grid has no
+    # zero-latent point.
+    assert diag.covariance_grid_fits == expected["covariance_grid_fits"] == 57 + 56
+    assert diag.covariance_status == "confirmed"
+    continuous = detect_retrospective(series(values, se=errors)).diagnostics.iloc[0]
+    assert continuous.covariance_measurement == "step_se"
+    assert continuous.covariance_grid_fits == 56
+    assert continuous.covariance_gain == pytest.approx(
+        confirm_ar1(
+            values / continuous.normalization_scale,
+            errors / continuous.normalization_scale,
+            10,
+            3.0,
+        )["covariance_gain"]
+    )
+
+
+def test_estimated_zero_se_step_does_not_veto_ar1_confirmation():
+    # A post-onset step where all 16 prompts agree has an estimated SE of
+    # exactly zero. Treated as a known zero, it would force both mean models onto
+    # the same near-unit-root corner of the grid and reject a clear shift that
+    # the independent mode selects. Pooling prevents that veto.
+    def frame(positives):
+        errors = np.sqrt(positives * (16 - positives) / (16 * 15)) / 4
+        return series(positives / 16, se=errors, kind="binary")
+
+    positives = np.r_[np.zeros(40, int), np.full(40, 3)]
+    positives[60] = 0
+    data = frame(positives)
+    saved = data.copy(deep=True)
+    for mode in ("independent", "ar1"):
+        result = detect_retrospective(data, dependence=mode)
+        assert result.changepoints.changepoint_step.tolist() == [41]
+    diag = result.diagnostics.iloc[0]
+    assert diag.covariance_status == "confirmed"
+    assert diag.covariance_measurement == "quasi_binomial_se"
+    assert not diag.covariance_null_variance_bound
+    assert_frame_equal(data, saved)

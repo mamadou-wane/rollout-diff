@@ -1,8 +1,8 @@
 """Lexical and structural response features.
 
 Complete think/thinking sections are excluded; resp_chars retains original length.
-Python snippets are parsed independently without execution. AST indicators omit
-alias resolution, dataflow, and outcomes. Non-Python fences are excluded from prose.
+AST indicators omit alias resolution, dataflow, and outcomes. Non-Python fences are
+excluded from prose.
 """
 
 from __future__ import annotations
@@ -712,8 +712,7 @@ def featurize(
     """Retain sparse features by peak prompt-balanced prevalence per tier.
 
     Average within prompts, then across all prompts at each run/step, including
-    zeros for absent features. Ties break lexically. Selection is label-free and
-    retrospective over all supplied data.
+    zeros for absent features. Ties break lexically.
     """
     if (
         isinstance(max_sparse_per_tier, bool)

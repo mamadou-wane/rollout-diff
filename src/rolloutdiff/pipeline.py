@@ -28,6 +28,8 @@ _EVIDENCE_COLUMNS = [
     "tier",
     "kind",
     "sequential_status",
+    "scale_source",
+    "numerical_floor_dominant",
     "retrospective_status",
     "onset_step",
     "alert_step",
@@ -331,10 +333,8 @@ def analyze_rollouts(
     """Screen all retained features and reward, then attach sequential evidence.
 
     Select vocabulary once for every run and both CRC32 whole-unit halves.
-    Units affect uncertainty and splitting; exact-prompt means stay unchanged.
     Anchor reward and prompt mix to onset through alert, with initial-baseline
-    prompt comparison and post-alert persistence. Report retrospective boundaries
-    separately, retaining diagnostics, screening denominators, and unavailable rows.
+    prompt comparison and post-alert persistence.
     """
     _validate_coverage_policy(replication_coverage_policy)
     if type(corroboration_radius) is not int or corroboration_radius < 0:
@@ -391,6 +391,8 @@ def analyze_rollouts(
             tier=diagnostic.tier,
             kind=diagnostic.kind,
             sequential_status=diagnostic.status,
+            scale_source=diagnostic.scale_source,
+            numerical_floor_dominant=bool(diagnostic.numerical_floor_dominant),
             retrospective_status=retro_diagnostics.loc[key, "status"],
             replication_coverage_policy=replication_coverage_policy,
         )
@@ -460,6 +462,9 @@ def analyze_rollouts(
         evidence[name] = pd.Series([row[name] for row in rows], dtype=object)
     evidence["replicates"] = pd.array(evidence.replicates, dtype="boolean")
     evidence["corroborates"] = pd.array(evidence.corroborates, dtype="boolean")
+    evidence["numerical_floor_dominant"] = evidence.numerical_floor_dominant.astype(
+        bool
+    )
     return AnalysisResult(
         features=features,
         aggregation=aggregation,

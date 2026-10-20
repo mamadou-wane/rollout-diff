@@ -13,12 +13,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from rolloutdiff.features import FeatureTables, featurize
 from rolloutdiff.pipeline import analyze_rollouts
 
 from .aria import ARIA_SHA256, load_aria_rollouts
+from .public_data import PublicRun, load_public_run
 from .synthetic import evaluate_fitted, fit_baseline, generate_fitted
 
 BASELINE_WINDOW = (1, 15)
+VOCABULARY = {"max_sparse_per_tier": 2000, "min_prevalence": 0.05}
+PUBLIC_RUNS = ("aisi0", "aisi2")
 SEQUENTIAL = {
     "baseline_steps": 15,
     "z_threshold": 4.0,
@@ -40,6 +44,7 @@ GENERATION = {
     "binary_effect": 0.20,
     "continuous_effect_sd": 2.0,
 }
+ACCEPTANCE = {"detection_within_tolerance": 0.95, "null_false_alert_rate": 0.005}
 
 
 def select_profiles(fits: pd.DataFrame) -> pd.DataFrame:
@@ -115,6 +120,41 @@ def summarize_trials(trials: pd.DataFrame) -> list[dict]:
     return output
 
 
+def acceptance(trials: pd.DataFrame) -> dict:
+    """Score each detector's pooled primary trials against the fixed thresholds."""
+    primary = trials.loc[
+        trials.evaluation_group.eq("primary") & trials.status.eq("generated")
+    ]
+    result = {}
+    for detector, group in primary.groupby("detector", sort=True):
+        planted, null = group.loc[group.planted], group.loc[~group.planted]
+        within = planted.timely if detector == "sequential" else planted.localized
+        detection = within.sum() / len(planted) if len(planted) else None
+        false_alerts = null.flagged.sum() / len(null) if len(null) else None
+        detection_met = (
+            detection is not None
+            and detection >= ACCEPTANCE["detection_within_tolerance"]
+        )
+        null_met = (
+            false_alerts is not None
+            and false_alerts <= ACCEPTANCE["null_false_alert_rate"]
+        )
+        result[detector] = {
+            "timing": "alert_delay" if detector == "sequential" else "boundary_error",
+            "n_planted": len(planted),
+            "n_within_tolerance": int(within.sum()),
+            "detection_within_tolerance": detection,
+            "n_null": len(null),
+            "n_false_alerts": int(null.flagged.sum()),
+            "null_false_alert_rate": false_alerts,
+            "thresholds": ACCEPTANCE,
+            "detection_met": detection_met,
+            "null_met": null_met,
+            "met": detection_met and null_met,
+        }
+    return result
+
+
 def _clean(value):
     if isinstance(value, dict):
         return {str(key): _clean(item) for key, item in value.items()}
@@ -127,26 +167,27 @@ def _clean(value):
     return value
 
 
-def run_local(path: str | Path) -> dict:
+def fitted_suite(
+    rollouts: pd.DataFrame,
+    features: FeatureTables,
+    *,
+    run: str,
+    sampling_units: pd.DataFrame | None = None,
+) -> dict:
+    """Fit baseline 1\u201315, select profiles, and evaluate null and planted trials."""
     start = time.perf_counter()
-    rollouts = load_aria_rollouts(path)
-    loaded = time.perf_counter()
-    print(
-        "Loaded pinned Aria: 51,200 rollouts; extracting the full retained vocabulary.",
-        flush=True,
+    fits = fit_baseline(
+        rollouts,
+        features,
+        run=run,
+        window=BASELINE_WINDOW,
+        sampling_units=sampling_units,
     )
-    analysis = analyze_rollouts(
-        rollouts, sequential_options=SEQUENTIAL, retrospective_options=RETROSPECTIVE
-    )
-    analyzed = time.perf_counter()
-    print(
-        f"Integrated {len(analysis.features.catalog) + 1} series in {analyzed - loaded:.2f}s; fitting baseline1\u201315.",
-        flush=True,
-    )
-    fits = fit_baseline(rollouts, analysis.features, run="aria", window=BASELINE_WINDOW)
     selected = select_profiles(fits)
     fitted = time.perf_counter()
-    print("Selected baseline profiles: " + ", ".join(selected.feature), flush=True)
+    print(
+        f"Selected {run} baseline profiles: " + ", ".join(selected.feature), flush=True
+    )
     evaluations, batches = [], []
     for planted, seed in [(False, 20261017), (True, 20261018)]:
         batch = generate_fitted(selected, seed=seed, planted=planted, **GENERATION)
@@ -175,6 +216,75 @@ def run_local(path: str | Path) -> dict:
     summaries = pd.concat(
         [evaluation.summary for evaluation in evaluations], ignore_index=True
     )
+    fit_coverage = (
+        fits.groupby(["tier", "kind", "fit_status"], dropna=False)
+        .size()
+        .rename("n")
+        .reset_index()
+    )
+    return {
+        "baseline_fit": {
+            "coverage": fit_coverage.to_dict("records"),
+            "n_temporal_unidentified": int(fits.ar1_raw.isna().sum()),
+            "n_ar_projected": int(fits.ar1_projected.sum()),
+            "n_prompt_variance_truncated": int(fits.prompt_variance_truncated.sum()),
+            "n_temporal_variance_truncated": int(
+                fits.temporal_variance_truncated.sum()
+            ),
+            "selected_profiles": selected.to_dict("records"),
+        },
+        "synthetic": {
+            "overall": summarize_trials(trials),
+            "per_profile": summaries.to_dict("records"),
+            "trials": trials.to_dict("records"),
+            "settings": batches,
+        },
+        "acceptance": acceptance(trials),
+        "runtime": {
+            "fit_seconds": fitted - start,
+            "simulation_seconds": finished - fitted,
+        },
+    }
+
+
+def public_suite(data: PublicRun, run: str) -> dict:
+    """Fitted suite for one loaded public run, using its source-problem units."""
+    features = featurize(data.rollouts, **VOCABULARY)
+    provenance = data.provenance
+    return {
+        "source": {
+            "rows": provenance["retained_rows"],
+            "steps": provenance["retained_steps"],
+            "sampling_unit_definition": provenance["sampling_unit_definition"],
+            "n_units": provenance["n_sampling_units"],
+        },
+        **fitted_suite(
+            data.rollouts, features, run=run, sampling_units=data.sampling_units
+        ),
+    }
+
+
+def run_local(path: str | Path, public_root: str | Path | None = None) -> dict:
+    start = time.perf_counter()
+    rollouts = load_aria_rollouts(path)
+    loaded = time.perf_counter()
+    print(
+        "Loaded pinned Aria: 51,200 rollouts; extracting the full retained vocabulary.",
+        flush=True,
+    )
+    analysis = analyze_rollouts(
+        rollouts,
+        **VOCABULARY,
+        sequential_options=SEQUENTIAL,
+        retrospective_options=RETROSPECTIVE,
+    )
+    analyzed = time.perf_counter()
+    print(
+        f"Integrated {len(analysis.features.catalog) + 1} series in {analyzed - loaded:.2f}s; fitting baseline 1\u201315.",
+        flush=True,
+    )
+    suite = fitted_suite(rollouts, analysis.features, run="aria")
+    finished = time.perf_counter()
     status_columns = [
         "sequential_status",
         "retrospective_status",
@@ -195,12 +305,6 @@ def run_local(path: str | Path) -> dict:
             for column in status_columns
         ]
     ).drop_duplicates(["run", "feature"])
-    fit_coverage = (
-        fits.groupby(["tier", "kind", "fit_status"], dropna=False)
-        .size()
-        .rename("n")
-        .reset_index()
-    )
     peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     peak_mb = peak_rss / (1024**2 if platform.system() == "Darwin" else 1024)
     report = {
@@ -213,7 +317,7 @@ def run_local(path: str | Path) -> dict:
             "baseline_window": BASELINE_WINDOW,
         },
         "policy": {
-            "vocabulary": {"max_sparse_per_tier": 2000, "min_prevalence": 0.05},
+            "vocabulary": VOCABULARY,
             "sequential": SEQUENTIAL,
             "retrospective": RETROSPECTIVE,
             "replication_tolerance": 10,
@@ -221,6 +325,7 @@ def run_local(path: str | Path) -> dict:
             "profile_selection": "baseline-only 25th/75th variance ranks per tier/kind + reward; separate degenerate checks",
             "generation": GENERATION,
             "timing_tolerance": 5,
+            "acceptance": ACCEPTANCE,
         },
         "pipeline": {
             "feature_count": len(analysis.features.catalog),
@@ -232,6 +337,12 @@ def run_local(path: str | Path) -> dict:
             .reset_index()
             .to_dict("records"),
             "sequential_screening": analysis.sequential.screening.to_dict("records"),
+            "n_floor_dominated_alerts": int(
+                analysis.sequential.alerts.numerical_floor_dominant.sum()
+            ),
+            "n_floor_dominated_series": int(
+                analysis.sequential.diagnostics.numerical_floor_dominant.sum()
+            ),
             "retrospective_screening": analysis.retrospective.screening.to_dict(
                 "records"
             ),
@@ -243,40 +354,31 @@ def run_local(path: str | Path) -> dict:
             "named_evidence": examples.to_dict("records"),
             "status_examples": unavailable_examples.to_dict("records"),
         },
-        "baseline_fit": {
-            "coverage": fit_coverage.to_dict("records"),
-            "n_temporal_unidentified": int(fits.ar1_raw.isna().sum()),
-            "n_ar_projected": int(fits.ar1_projected.sum()),
-            "n_prompt_variance_truncated": int(fits.prompt_variance_truncated.sum()),
-            "n_temporal_variance_truncated": int(
-                fits.temporal_variance_truncated.sum()
-            ),
-            "selected_profiles": selected.to_dict("records"),
-        },
-        "synthetic": {
-            "overall": summarize_trials(trials),
-            "per_profile": summaries.to_dict("records"),
-            "trials": trials.to_dict("records"),
-            "settings": batches,
-        },
+        "baseline_fit": suite["baseline_fit"],
+        "synthetic": suite["synthetic"],
+        "acceptance": suite["acceptance"],
         "runtime": {
             "python": platform.python_version(),
             "platform": platform.platform(),
             "load_seconds": loaded - start,
             "pipeline_seconds": analyzed - loaded,
-            "fit_seconds": fitted - analyzed,
-            "simulation_seconds": finished - fitted,
+            **suite["runtime"],
             "total_seconds": finished - start,
             "peak_rss_mb": peak_mb,
         },
         "limitations": [
             "Synthetic rates are per generated single-series trial, not full-run error guarantees.",
-            "Aria baseline1\u201315 is not verified clean and only supplies15 observations for temporal fitting.",
+            "Aria baseline 1\u201315 is not verified clean and only supplies 15 observations for temporal fitting.",
             "Stationarity, independent fresh prompt groups, Gaussian continuous values, and fixed fitted parameters are assumptions.",
             "Continuous surrogates do not enforce count or nonnegative support; binary common probabilities may be clipped.",
             "Full-run vocabulary selection is retrospective; no full-run ranking, label attribution or causal claim is tested.",
         ],
     }
+    if public_root is not None:
+        report["additional_runs"] = {
+            run: public_suite(load_public_run(public_root, run), run)
+            for run in PUBLIC_RUNS
+        }
     return _clean(report)
 
 
@@ -284,8 +386,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--aria", required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--public-root", help="pinned public data root for AISI fits")
     args = parser.parse_args()
-    report = run_local(args.aria)
+    root = Path(__file__).resolve().parents[1]
+    if args.output is not None and args.output.resolve().is_relative_to(root):
+        parser.error("generated results must stay outside the repository")
+    report = run_local(args.aria, args.public_root)
     text = json.dumps(report, indent=2, allow_nan=False)
     if args.output:
         args.output.write_text(text + "\n")

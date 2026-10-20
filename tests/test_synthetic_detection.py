@@ -1,8 +1,6 @@
-"""Uncalibrated controlled cases using synthetic baseline parameters.
+"""Controlled cases using synthetic baseline parameters.
 
 Large planted shifts isolate sustained-onset and direction behavior.
-Both families have fixed between-prompt heterogeneity, modest common AR(1)
-variation, and independent rollout sampling conditional on those effects.
 """
 
 import numpy as np

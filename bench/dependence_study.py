@@ -1,4 +1,4 @@
-"""Paired temporal-dependence study, fitted to pinned Aria reward baseline1\u201315."""
+"""Paired temporal-dependence study, fitted to pinned Aria reward baseline 1\u201315."""
 
 from __future__ import annotations
 
@@ -93,8 +93,51 @@ def make_scenario(
     return SyntheticBatch(series, trials, settings)
 
 
-def evaluate_pair(batch: SyntheticBatch, suite: str) -> pd.DataFrame:
+def _oracle_gains(series: pd.DataFrame, settings: dict, fit: pd.Series, minimum: int):
+    """GLS gains at every boundary under the generating covariance.
+
+    Isolates covariance estimation from boundary search and penalty: the gain
+    at the L2 boundary tests the selected split with the true covariance, and
+    the maximum over boundaries tests the search itself.
+    """
+    x = series["mean"].to_numpy()
+    n = len(x)
+    counts = series.n_rollouts.to_numpy() / series.n_prompts.to_numpy()
+    multiplier = settings["sampling_multiplier"]
+    measured = (
+        multiplier
+        * (fit.prompt_variance + fit.within_variance / counts)
+        / series.n_prompts
+    )
+    index = np.arange(n)
+    covariance = settings["temporal_variance"] * settings["rho"] ** np.abs(
+        index[:, None] - index[None, :]
+    ) + np.diag(measured.to_numpy(dtype=float))
+    root = np.linalg.cholesky(covariance)
+    logdet = 2 * np.log(np.diag(root)).sum()
+    whitened_y = np.linalg.solve(root, x)
+    whitened_one = np.linalg.solve(root, np.ones(n))
+
+    def cost(design):
+        coefficient, *_ = np.linalg.lstsq(design, whitened_y, rcond=None)
+        residual = whitened_y - design @ coefficient
+        return logdet + residual @ residual, coefficient
+
+    null, _ = cost(whitened_one[:, None])
+    gains = {}
+    for boundary in range(minimum, n - minimum + 1):
+        step = np.linalg.solve(root, (index >= boundary).astype(float))
+        alternative, coefficient = cost(np.column_stack([whitened_one, step]))
+        gains[boundary] = (null - alternative, coefficient[1])
+    return gains
+
+
+def evaluate_pair(
+    batch: SyntheticBatch, suite: str, *, oracle: pd.Series | None = None
+) -> pd.DataFrame:
+    """Score both detector modes and, with the scenario's fit, two oracle arms."""
     records, selected = [], {}
+    oracle_rows = []
     for method in ("independent", "ar1"):
         result = detect_retrospective(batch.series, dependence=method)
         diagnostics = result.diagnostics.set_index(["run", "feature"])
@@ -140,7 +183,50 @@ def evaluate_pair(batch: SyntheticBatch, suite: str) -> pd.DataFrame:
                 }
             )
             records.append(row)
-    # Confirmation only removes selections; it never relocalizes them.
+            if method == "independent" and oracle is not None:
+                oracle_rows.append((trial, row, diagnostic))
+    minimum = 5
+    for trial, row, diagnostic in oracle_rows:
+        series = batch.series.loc[batch.series.run.eq(trial["run"])].sort_values("step")
+        gains = _oracle_gains(series, batch.settings, oracle, minimum)
+        penalty = 3.0 * np.log(len(series))
+        arms = {}
+        if diagnostic.status == "change":
+            boundary = int(diagnostic.n_before)
+            arms["oracle_boundary"] = (boundary, *gains[boundary])
+        best = max(gains, key=lambda k: gains[k][0])
+        arms["oracle_search"] = (best, *gains[best])
+        for method in ("oracle_boundary", "oracle_search"):
+            flagged, detected, error = False, False, np.nan
+            if method in arms:
+                boundary, gain, effect = arms[method]
+                flagged = gain > penalty
+                if flagged and trial["planted"]:
+                    detected = np.sign(effect) == np.sign(trial["effect"])
+                    if detected:
+                        error = int(series.step.to_numpy()[boundary]) - trial["onset"]
+            records.append(
+                {
+                    **{
+                        key: row[key]
+                        for key in row
+                        if not key.startswith("covariance_")
+                    },
+                    "method": method,
+                    "scorable": method in arms or diagnostic.status != "change",
+                    "flagged": flagged,
+                    "detected": detected,
+                    "wrong_direction": flagged and trial["planted"] and not detected,
+                    "localized": detected and abs(error) <= TOLERANCE,
+                    "boundary_error": error,
+                    "absolute_error": abs(error),
+                    "candidate_step": int(series.step.to_numpy()[arms[method][0]])
+                    if method in arms
+                    else None,
+                    "detector_status": "oracle",
+                    "detector_reason": "generating_covariance",
+                }
+            )
     old, new = selected["independent"], selected["ar1"]
     if not new.index.isin(old.index).all():
         raise AssertionError("confirmation introduced a new boundary")
@@ -211,7 +297,7 @@ def run_study(path: str | Path) -> dict:
             n_replicates=32,
             effect_sd=0.0,
         )
-        evaluations.append(evaluate_pair(batch, "historical_diagnosis"))
+        evaluations.append(evaluate_pair(batch, "historical_diagnosis", oracle=fit))
     for seed in SEEDS:
         for rho in RHOS:
             for effect in EFFECTS:
@@ -223,7 +309,7 @@ def run_study(path: str | Path) -> dict:
                     n_replicates=N_REPLICATES,
                     effect_sd=effect,
                 )
-                evaluations.append(evaluate_pair(batch, "fresh_dependence"))
+                evaluations.append(evaluate_pair(batch, "fresh_dependence", oracle=fit))
             print(f"Completed seed={seed}, rho={rho}", flush=True)
         for sampling in (0.25, 1.0, 4.0):
             for effect in (0.0, 0.5, 2.0):
@@ -235,7 +321,7 @@ def run_study(path: str | Path) -> dict:
                     n_replicates=N_REPLICATES,
                     effect_sd=effect,
                 )
-                evaluations.append(evaluate_pair(batch, "fresh_sampling"))
+                evaluations.append(evaluate_pair(batch, "fresh_sampling", oracle=fit))
             print(f"Completed seed={seed}, sampling multiplier={sampling}", flush=True)
     trials = pd.concat(evaluations, ignore_index=True)
     root = Path(__file__).resolve().parents[1]
@@ -267,7 +353,7 @@ def run_study(path: str | Path) -> dict:
                 "effect_unit": "original fitted rollout marginal SD",
                 "positive_negative": "alternating replicate parity",
                 "pairing": "same random draws and SE for each effect; same standard-normal draws across rho and sampling",
-                "methods": ("independent", "ar1"),
+                "methods": ("independent", "ar1", "oracle_boundary", "oracle_search"),
                 "min_segment_steps": 5,
                 "penalty_multiplier": 3.0,
                 "frozen_before_fresh_outcomes": True,
@@ -282,6 +368,7 @@ def run_study(path: str | Path) -> dict:
                 "Fixed-parameter stationary Gaussian latent AR1 plus independent prompt noise only.",
                 "No multiple-feature false-selection guarantee or parameter-uncertainty bootstrap.",
                 "Covariance confirmation evaluates only the original L2 boundary on a fixed nuisance grid.",
+                "Oracle arms use the generating covariance and are unavailable to the detector.",
                 "Conditional boundary-error changes reflect selection, never improved boundary estimation.",
             ],
         }

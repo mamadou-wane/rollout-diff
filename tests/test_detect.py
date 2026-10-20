@@ -86,7 +86,7 @@ def test_binary_effect_floor_is_inclusive_but_z_threshold_is_strict():
     assert low.alerts.empty
 
 
-def test_binary_decrease_does_not_trigger_the_prototype_rise_rule():
+def test_binary_decrease_does_not_alert():
     assert detect(series([1] * 3 + [0] * 3, se=0.01, kind="binary")).alerts.empty
 
 

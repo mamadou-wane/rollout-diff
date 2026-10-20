@@ -9,11 +9,6 @@ from rolloutdiff.series import aggregate
 
 pytestmark = pytest.mark.local_data
 
-# Scalar reference policy: first 15 observed steps; scale=max(baseline sample SD,
-# median of all baseline prompt SEs, 1e-9); z>4 and delta>=.10 for binary increases;
-# |z|>4 for continuous series; three consecutive observations in the same direction.
-# Fixed named-feature checks leave discovery and false-alert rates unmeasured.
-# This policy is independent of the archive's statistical policy.
 _BASELINES = {
     "call:bisect.bisect_left": {
         "baseline_mean": 0.004427083333333333,
@@ -152,8 +147,6 @@ def test_local_aria_detection_is_prefix_invariant(aria_series, aria_detection, c
         expected_scores.reset_index(drop=True),
     )
 
-    # Appending different valid future means and SEs must preserve all earlier
-    # scores and alerts because the monitored baseline is frozen.
     changed = aria_series.copy()
     future = changed.step.gt(cutoff)
     changed.loc[future & changed.kind.eq("binary"), "mean"] = 0.5

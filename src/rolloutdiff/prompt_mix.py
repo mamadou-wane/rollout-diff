@@ -1,4 +1,4 @@
-"""Descriptive prompt-mix evidence for caller-selected windows of one run."""
+"""Prompt-mix evidence for caller-selected windows of one run."""
 
 from __future__ import annotations
 
@@ -63,7 +63,6 @@ def _keywords(values: Sequence[str]) -> list[str]:
 
 
 def _ks(before: np.ndarray, after: np.ndarray) -> float:
-    """Return the maximum absolute distance between empirical CDFs."""
     points = np.union1d(before, after)
     a = np.searchsorted(np.sort(before), points, side="right") / len(before)
     b = np.searchsorted(np.sort(after), points, side="right") / len(after)
@@ -145,8 +144,7 @@ def prompt_mix(
     breadth is unavailable. Descriptors count distinct prompts once per window:
     length uses empirical KS distance. Literal, case-insensitive keywords bounded
     by non-word characters use absolute prevalence change. Difficulty total variation uses
-    known tags only and is unavailable if either window has none. Return per-prompt
-    values and known/missing counts.
+    known tags only and is unavailable if either window has none.
     """
     before, after = _window(before), _window(after)
     if before[1] >= after[0]:

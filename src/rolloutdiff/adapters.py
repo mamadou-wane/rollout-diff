@@ -2,14 +2,16 @@
 
 Layout references:
 https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_trainer.py (log)
-https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/ray_trainer.py (_write_generations)
+https://github.com/verl-project/verl/blob/v0.9.1/verl/trainer/ppo/ray_trainer.py (_write_generations)
 """
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import re
+import zlib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,7 @@ import pandas as pd
 from .schema import CANONICAL_COLUMNS, validate_rollouts
 
 _TRL_FILE = re.compile(r"completions_(\d+)\.parquet\Z")
-_VERL_FILE = re.compile(r"(\d+)\.jsonl\Z")
+_VERL_FILE = re.compile(r"(?:step_)?(\d+)\.jsonl(?:\.gz)?\Z")
 
 
 def _plain(value: Any) -> Any:
@@ -85,8 +87,7 @@ def from_table(
 
     `step`, `prompt`, `response`, `reward` default to their canonical names.
     Optional `sample_id`, `prompt_id`, and `tool_calls` columns are used when
-    present or explicitly mapped. Generated sample IDs are source:row-position;
-    persist explicit IDs if source rows may later be reordered.
+    present or explicitly mapped. Generated sample IDs are source:row-position.
     """
     if not table.columns.is_unique:
         raise ValueError("duplicate input column names")
@@ -191,8 +192,7 @@ def load_trl(
 ) -> pd.DataFrame:
     """Read completions_<step>.parquet, or a trainer output's completions/.
 
-    TRL may log named reward components without their weighted total. Only
-    `reward` is selected automatically; specify reward_column for other columns.
+    Only `reward` is selected automatically; specify reward_column for other columns.
     """
     path = Path(path)
     if path.is_dir() and (path / "completions").is_dir():
@@ -222,21 +222,29 @@ def load_trl(
 
 
 def load_verl(path: str | Path, *, run: str) -> pd.DataFrame:
-    """Read verl rollout_data_dir/<step>.jsonl with input/output/score/step."""
+    """Read verl rollout_data_dir/<step>.jsonl with input/output/score/step.
+
+    Also reads `step_<step>` names and gzip `.jsonl.gz` shards; steps may be
+    zero-padded.
+    """
     parts = []
-    for file in _files(path, _VERL_FILE, "*.jsonl"):
+    for file in _files(path, _VERL_FILE, "*.jsonl*"):
         rows = []
-        with file.open(encoding="utf-8") as stream:
-            for line_number, line in enumerate(stream, 1):
-                try:
-                    row = json.loads(line)
-                    if not isinstance(row, dict):
-                        raise ValueError
-                except (ValueError, TypeError):
-                    raise ValueError(
-                        f"{file.name}:{line_number}: invalid JSON object"
-                    ) from None
-                rows.append(row)
+        open_text = gzip.open if file.suffix == ".gz" else open
+        try:
+            with open_text(file, "rt", encoding="utf-8") as stream:
+                for line_number, line in enumerate(stream, 1):
+                    try:
+                        row = json.loads(line)
+                        if not isinstance(row, dict):
+                            raise ValueError
+                    except (ValueError, TypeError):
+                        raise ValueError(
+                            f"{file.name}:{line_number}: invalid JSON object"
+                        ) from None
+                    rows.append(row)
+        except (EOFError, gzip.BadGzipFile, zlib.error):
+            raise ValueError(f"{file.name}: invalid gzip data") from None
         table = pd.DataFrame(
             rows, columns=None if rows else ["input", "output", "score", "step"]
         )

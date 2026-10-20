@@ -316,7 +316,6 @@ def test_load_does_not_mutate_manifest(tmp_path):
 
 def test_aisi_system_prompt_variants_have_distinct_canonical_identity(tmp_path):
     table = aisi_table()
-    # Same source problem, different ordering of system instructions within a batch.
     for index in (1, 3):
         messages = copy.deepcopy(table.at[index, "messages"])
         messages[0]["content"] = "different system instruction order"
