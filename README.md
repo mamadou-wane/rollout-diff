@@ -126,7 +126,7 @@ Benchmark inputs and outputs stay outside the repository.
   $+0.20$ prevalence or $+2$ rollout-level SD shifts at step $40$ of $80$, and scores each
   detector on its
   pooled non-degenerate profiles: $\ge 95\%$ of planted shifts found within $5$ steps (alert
-  delay or boundary error) and $\le 0.5\%$ of no-change series flagged.
+  delay or boundary error) and $\le 0.5\%$ of scorable no-change series flagged.
 
 ```sh
 # --verify-only checks the pins without running analysis

@@ -121,23 +121,29 @@ def summarize_trials(trials: pd.DataFrame) -> list[dict]:
 
 
 def acceptance(trials: pd.DataFrame) -> dict:
-    """Score each detector's pooled primary trials against the fixed thresholds."""
+    """Score each detector's pooled primary trials against the fixed thresholds.
+
+    The null rate counts only scorable trials; with none, it and ``null_met`` are
+    unavailable (None), so ``met`` is never True.
+    """
     primary = trials.loc[
         trials.evaluation_group.eq("primary") & trials.status.eq("generated")
     ]
     result = {}
     for detector, group in primary.groupby("detector", sort=True):
         planted, null = group.loc[group.planted], group.loc[~group.planted]
+        scorable = int(null.scorable.sum())
         within = planted.timely if detector == "sequential" else planted.localized
         detection = within.sum() / len(planted) if len(planted) else None
-        false_alerts = null.flagged.sum() / len(null) if len(null) else None
+        false_alerts = null.flagged.sum() / scorable if scorable else None
         detection_met = (
             detection is not None
             and detection >= ACCEPTANCE["detection_within_tolerance"]
         )
         null_met = (
-            false_alerts is not None
-            and false_alerts <= ACCEPTANCE["null_false_alert_rate"]
+            None
+            if false_alerts is None
+            else bool(false_alerts <= ACCEPTANCE["null_false_alert_rate"])
         )
         result[detector] = {
             "timing": "alert_delay" if detector == "sequential" else "boundary_error",
@@ -145,6 +151,8 @@ def acceptance(trials: pd.DataFrame) -> dict:
             "n_within_tolerance": int(within.sum()),
             "detection_within_tolerance": detection,
             "n_null": len(null),
+            "n_null_scorable": scorable,
+            "n_null_unscorable": len(null) - scorable,
             "n_false_alerts": int(null.flagged.sum()),
             "null_false_alert_rate": false_alerts,
             "thresholds": ACCEPTANCE,

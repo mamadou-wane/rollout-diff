@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 from pandas.testing import assert_frame_equal
 
 from bench.run_local import acceptance, select_profiles, summarize_trials
@@ -190,19 +191,21 @@ def test_public_suite_reports_source_units_and_fitted_structure():
     }
 
 
-def test_acceptance_scores_primary_profiles_per_detector_with_distinct_timing():
-    def trial(detector, planted, group="primary", status="generated", **flags):
-        row = {
-            "detector": detector,
-            "planted": planted,
-            "evaluation_group": group,
-            "status": status,
-            "flagged": False,
-            "timely": False,
-            "localized": False,
-        }
-        return row | flags
+def trial(detector, planted, group="primary", status="generated", **flags):
+    row = {
+        "detector": detector,
+        "planted": planted,
+        "evaluation_group": group,
+        "status": status,
+        "scorable": True,
+        "flagged": False,
+        "timely": False,
+        "localized": False,
+    }
+    return row | flags
 
+
+def test_acceptance_scores_primary_profiles_per_detector_with_distinct_timing():
     rows = (
         [trial("sequential", True, flagged=True, timely=True)] * 19
         + [trial("sequential", True, flagged=True, timely=False)]
@@ -225,3 +228,25 @@ def test_acceptance_scores_primary_profiles_per_detector_with_distinct_timing():
     assert retrospective["null_false_alert_rate"] == 0.01
     assert retrospective["detection_met"] and not retrospective["null_met"]
     assert not retrospective["met"]
+
+
+@pytest.mark.parametrize(
+    "n_unscorable,rate,null_met",
+    [(0, 0.005, True), (100, 0.01, False), (200, None, None)],
+)
+def test_acceptance_null_rate_counts_only_scorable_trials(n_unscorable, rate, null_met):
+    # One false alert among the scorable nulls; unscorable nulls are never flagged.
+    n_scorable = 200 - n_unscorable
+    rows = (
+        [trial("sequential", True, flagged=True, timely=True)] * 20
+        + [trial("sequential", False, flagged=True)] * min(n_scorable, 1)
+        + [trial("sequential", False)] * max(n_scorable - 1, 0)
+        + [trial("sequential", False, scorable=False)] * n_unscorable
+    )
+    block = acceptance(pd.DataFrame(rows))["sequential"]
+    assert (block["n_null"], block["n_null_scorable"]) == (200, n_scorable)
+    assert block["n_null_unscorable"] == n_unscorable
+    assert block["n_false_alerts"] == min(n_scorable, 1)
+    assert block["null_false_alert_rate"] == rate
+    assert block["detection_met"]
+    assert block["null_met"] is null_met and block["met"] is null_met

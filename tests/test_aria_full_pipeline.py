@@ -171,6 +171,8 @@ def test_local_acceptance_matches_pooled_primary_counts(local_report):
         assert block["n_planted"] == planted["n_generated"]
         assert block["n_within_tolerance"] == planted[within]
         assert block["n_null"] == null["n_generated"]
+        assert block["n_null_scorable"] == null["n_scorable"]
+        assert block["n_null_unscorable"] == null["n_unscorable"]
         assert block["n_false_alerts"] == null["n_flagged"]
         assert block["thresholds"] == {
             "detection_within_tolerance": 0.95,
