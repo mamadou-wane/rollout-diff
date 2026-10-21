@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import zlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from numbers import Real
 
 import numpy as np
@@ -15,6 +15,7 @@ from ._sampling import resolve_sampling_units, subset_sampling_units
 from .corroboration import _corroboration_prepared
 from .detect import DetectionResult, detect_sequential
 from .evidence import _persistence_prepared, _reward_association_prepared
+from .exemplars import _exemplar_table, _select_exemplars_prepared
 from .features import FeatureTables, featurize
 from .prompt_mix import _prompt_mix_prepared
 from .replication import _replication_prepared, _validate_coverage_policy
@@ -90,6 +91,7 @@ class AnalysisResult:
     reward_groups: pd.DataFrame
     prompt_values: pd.DataFrame
     prompt_shifts: pd.DataFrame
+    exemplars: pd.DataFrame = field(default_factory=_exemplar_table)
 
 
 def _options(value: Mapping | None, name: str) -> dict:
@@ -472,5 +474,6 @@ def analyze_rollouts(
         retrospective=retrospective,
         evidence=evidence,
         half_assignments=assignments,
+        exemplars=_select_exemplars_prepared(values, sequential.alerts),
         **{name: _details(parts) for name, parts in detail_parts.items()},
     )

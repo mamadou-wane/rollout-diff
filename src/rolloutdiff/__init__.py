@@ -9,6 +9,7 @@ from .evidence import (
     persistence,
     reward_association,
 )
+from .exemplars import select_exemplars
 from .features import FeatureTables, RolloutFeatures, extract, featurize
 from .pipeline import AnalysisResult, analyze_rollouts
 from .prompt_mix import PromptMixEvidence, prompt_mix
@@ -43,6 +44,7 @@ __all__ = [
     "persistence",
     "prompt_mix",
     "reward_association",
+    "select_exemplars",
     "split_half_replication",
     "validate_rollouts",
 ]
