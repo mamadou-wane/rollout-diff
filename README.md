@@ -24,6 +24,8 @@ analysis = analyze_rollouts(rollouts)
 print(analysis.evidence)
 print(analysis.sequential.screening)
 print(analysis.exemplars)
+print(analysis.events)
+print(analysis.event_members)
 ```
 
 `evidence` has one row per feature series and `scalar:reward`, including non-alerting and
@@ -107,6 +109,15 @@ Canonical `(run, sample_id)` references and selection metadata let reports resol
 original response without copying its text. Unsupported or unavailable evidence has
 explicit status rows. Examples illustrate feature presence; they do not establish hack
 success or statistical representativeness.
+
+### Sequential alert events
+
+`analysis.events` groups compatible sequential alerts. `analysis.event_members` links them
+to feature-level evidence and exemplars through `(run, feature)`.
+
+`group_events()` uses onset proximity (≤3 steps) and positive-rollout overlap (Jaccard ≥0.5).
+Unsupported or unavailable alerts remain singletons. Event IDs are analysis-local, and
+grouping does not establish a shared cause.
 
 ## Limitations
 

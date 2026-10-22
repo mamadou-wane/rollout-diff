@@ -14,6 +14,7 @@ from ._feature_values import _FeatureValueIndex
 from ._sampling import resolve_sampling_units, subset_sampling_units
 from .corroboration import _corroboration_prepared
 from .detect import DetectionResult, detect_sequential
+from .events import _event_table, _group_events_prepared, _member_table
 from .evidence import _persistence_prepared, _reward_association_prepared
 from .exemplars import _exemplar_table, _select_exemplars_prepared
 from .features import FeatureTables, featurize
@@ -92,6 +93,8 @@ class AnalysisResult:
     prompt_values: pd.DataFrame
     prompt_shifts: pd.DataFrame
     exemplars: pd.DataFrame = field(default_factory=_exemplar_table)
+    events: pd.DataFrame = field(default_factory=_event_table)
+    event_members: pd.DataFrame = field(default_factory=_member_table)
 
 
 def _options(value: Mapping | None, name: str) -> dict:
@@ -467,6 +470,7 @@ def analyze_rollouts(
     evidence["numerical_floor_dominant"] = evidence.numerical_floor_dominant.astype(
         bool
     )
+    grouped = _group_events_prepared(values, sequential.alerts)
     return AnalysisResult(
         features=features,
         aggregation=aggregation,
@@ -475,5 +479,7 @@ def analyze_rollouts(
         evidence=evidence,
         half_assignments=assignments,
         exemplars=_select_exemplars_prepared(values, sequential.alerts),
+        events=grouped.events,
+        event_members=grouped.members,
         **{name: _details(parts) for name, parts in detail_parts.items()},
     )

@@ -3,6 +3,7 @@
 from .adapters import from_table, load_trl, load_verl
 from .corroboration import EventWindowEvidence, event_window_corroboration
 from .detect import DetectionResult, detect_sequential
+from .events import EventGrouping, group_events
 from .evidence import (
     PersistenceEvidence,
     RewardAssociation,
@@ -22,6 +23,7 @@ __all__ = [
     "Aggregation",
     "AnalysisResult",
     "DetectionResult",
+    "EventGrouping",
     "EventWindowEvidence",
     "FeatureTables",
     "PersistenceEvidence",
@@ -39,6 +41,7 @@ __all__ = [
     "extract",
     "featurize",
     "from_table",
+    "group_events",
     "load_trl",
     "load_verl",
     "persistence",
