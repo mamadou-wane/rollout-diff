@@ -11,7 +11,7 @@ from rolloutdiff import AnalysisResult
 def _tables(result, prefix=""):
     tables = {}
     for field in fields(result):
-        if not prefix and field.name in {"events", "event_members"}:
+        if not prefix and field.name in {"events", "event_members", "event_ranking"}:
             continue
         value = getattr(result, field.name)
         name = f"{prefix}{field.name}"

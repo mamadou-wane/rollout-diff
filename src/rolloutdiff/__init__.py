@@ -14,6 +14,7 @@ from .exemplars import select_exemplars
 from .features import FeatureTables, RolloutFeatures, extract, featurize
 from .pipeline import AnalysisResult, analyze_rollouts
 from .prompt_mix import PromptMixEvidence, prompt_mix
+from .ranking import rank_events
 from .replication import ReplicationEvidence, split_half_replication
 from .retrospective import RetrospectiveResult, detect_retrospective
 from .schema import Rollout, validate_rollouts
@@ -46,6 +47,7 @@ __all__ = [
     "load_verl",
     "persistence",
     "prompt_mix",
+    "rank_events",
     "reward_association",
     "select_exemplars",
     "split_half_replication",

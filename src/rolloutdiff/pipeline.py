@@ -19,6 +19,7 @@ from .evidence import _persistence_prepared, _reward_association_prepared
 from .exemplars import _exemplar_table, _select_exemplars_prepared
 from .features import FeatureTables, featurize
 from .prompt_mix import _prompt_mix_prepared
+from .ranking import _ranking_table, rank_events
 from .replication import _replication_prepared, _validate_coverage_policy
 from .retrospective import RetrospectiveResult, detect_retrospective
 from .schema import validate_rollouts
@@ -95,6 +96,7 @@ class AnalysisResult:
     exemplars: pd.DataFrame = field(default_factory=_exemplar_table)
     events: pd.DataFrame = field(default_factory=_event_table)
     event_members: pd.DataFrame = field(default_factory=_member_table)
+    event_ranking: pd.DataFrame = field(default_factory=_ranking_table)
 
 
 def _options(value: Mapping | None, name: str) -> dict:
@@ -481,5 +483,6 @@ def analyze_rollouts(
         exemplars=_select_exemplars_prepared(values, sequential.alerts),
         events=grouped.events,
         event_members=grouped.members,
+        event_ranking=rank_events(grouped.events, grouped.members, evidence),
         **{name: _details(parts) for name, parts in detail_parts.items()},
     )

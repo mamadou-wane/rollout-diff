@@ -26,6 +26,7 @@ print(analysis.sequential.screening)
 print(analysis.exemplars)
 print(analysis.events)
 print(analysis.event_members)
+print(analysis.event_ranking)
 ```
 
 `evidence` has one row per feature series and `scalar:reward`, including non-alerting and
@@ -118,6 +119,11 @@ to feature-level evidence and exemplars through `(run, feature)`.
 `group_events()` uses onset proximity (≤3 steps) and positive-rollout overlap (Jaccard ≥0.5).
 Unsupported or unavailable alerts remain singletons. Event IDs are analysis-local, and
 grouping does not establish a shared cause.
+
+`analysis.event_ranking` (also available through `rank_events`) orders events within each
+run using one representative member's evidence. Priority follows feature tier, replication,
+persistence, signed reward association, and prompt breadth. Contextual and unavailable
+events remain listed, with evidence statuses and numerical-floor warnings.
 
 ## Limitations
 
