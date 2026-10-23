@@ -12,6 +12,7 @@ from .evidence import (
 )
 from .exemplars import select_exemplars
 from .features import FeatureTables, RolloutFeatures, extract, featurize
+from .html_report import render_report
 from .pipeline import AnalysisResult, analyze_rollouts
 from .prompt_mix import PromptMixEvidence, prompt_mix
 from .ranking import rank_events
@@ -50,6 +51,7 @@ __all__ = [
     "persistence",
     "prompt_mix",
     "rank_events",
+    "render_report",
     "reward_association",
     "select_exemplars",
     "split_half_replication",

@@ -1,4 +1,4 @@
-"""Analyze an existing rollout dump and write an investigation report."""
+"""Analyze rollout dumps and render investigation reports."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ import sys
 from pathlib import Path
 
 from .adapters import load_trl, load_verl
+from .html_report import load_report, render_report
 from .pipeline import analyze_rollouts
-from .report import _check_output_path, build_report, write_report
+from .report import _check_output_path, _write_text, build_report, write_report
 
 
 class _Once(argparse.Action):
@@ -39,6 +40,11 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument(
         "--reward-column", type=_nonempty, action=_Once, help="TRL reward column"
     )
+    render = commands.add_parser(
+        "render", help="render a JSON investigation report", allow_abbrev=False
+    )
+    render.add_argument("input", type=_nonempty, help="version-1 JSON report")
+    render.add_argument("--output", required=True, type=_nonempty, action=_Once)
     return parser
 
 
@@ -67,22 +73,38 @@ def _summary(report: dict) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    if args.reward_column is not None and args.format != "trl":
+    if (
+        args.command == "analyze"
+        and args.reward_column is not None
+        and args.format != "trl"
+    ):
         parser.error("--reward-column is supported only with --format trl")
     try:
         output = Path(args.output)
         _check_output_path(output)
-        rollouts = (
-            load_trl(args.input, run=args.run, reward_column=args.reward_column)
-            if args.format == "trl"
-            else load_verl(args.input, run=args.run)
-        )
-        report = build_report(analyze_rollouts(rollouts), run=args.run)
-        write_report(report, output)
+        if args.command == "render":
+            report = load_report(args.input)
+            _write_text(render_report(report), output)
+        else:
+            rollouts = (
+                load_trl(args.input, run=args.run, reward_column=args.reward_column)
+                if args.format == "trl"
+                else load_verl(args.input, run=args.run)
+            )
+            report = build_report(analyze_rollouts(rollouts), run=args.run)
+            write_report(report, output)
     except (OSError, ValueError) as exc:
         print(f"rolloutdiff: error: {exc}", file=sys.stderr)
         return 1
-    _summary(report)
+    if args.command == "analyze":
+        _summary(report)
+    else:
+        print(
+            f"Rendered {sum(len(run['events']) for run in report['runs'])} events "
+            f"across {len(report['runs'])} runs."
+        )
+        for run in report["runs"]:
+            print(f"Run {run['run']!r}: {len(run['events'])} events.")
     return 0
 
 

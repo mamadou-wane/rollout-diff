@@ -430,7 +430,12 @@ def write_report(report: dict, path: str | Path) -> None:
     """Publish a complete report atomically; never replace an existing path."""
     path = Path(path)
     _check_output_path(path)
-    text = report_json(report)
+    _write_text(report_json(report), path)
+
+
+def _write_text(text: str, path: str | Path) -> None:
+    path = Path(path)
+    _check_output_path(path)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(
