@@ -32,6 +32,16 @@ print(analysis.event_ranking)
 `evidence` has one row per feature series and `scalar:reward`, including non-alerting and
 unscorable series.
 
+```sh
+.venv/bin/rolloutdiff analyze /path/to/completions --format trl --run experiment-1 \
+  --reward-column training_passed --output /path/to/report.json
+```
+
+Use `--format verl` for verl dumps and omit `--reward-column`. The versioned JSON report
+contains ranked events, member evidence, and canonical exemplar references, without raw
+rollout text or input paths. Existing output files are never overwritten. Python callers
+can use `build_report(analysis)`; identifiers shaped as absolute paths cannot be exported.
+
 | Loader | Accepted input | Schema mapping |
 | :--- | :--- | :--- |
 | `load_trl` | Completions dir, trainer output dir, or `completions_<step>.parquet` | Uses `reward_column` if given, else `reward` (TRL may log one column per reward function and no total); NaN rewards fail |

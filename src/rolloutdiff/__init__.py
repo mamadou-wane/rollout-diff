@@ -16,6 +16,7 @@ from .pipeline import AnalysisResult, analyze_rollouts
 from .prompt_mix import PromptMixEvidence, prompt_mix
 from .ranking import rank_events
 from .replication import ReplicationEvidence, split_half_replication
+from .report import build_report
 from .retrospective import RetrospectiveResult, detect_retrospective
 from .schema import Rollout, validate_rollouts
 from .series import Aggregation, aggregate
@@ -36,6 +37,7 @@ __all__ = [
     "RolloutFeatures",
     "aggregate",
     "analyze_rollouts",
+    "build_report",
     "detect_retrospective",
     "detect_sequential",
     "event_window_corroboration",

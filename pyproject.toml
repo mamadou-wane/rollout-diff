@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26", "pandas>=2.2,<3", "pyarrow>=17", "pydantic>=2,<3"]
 
+[project.scripts]
+rolloutdiff = "rolloutdiff.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest>=8"]
 
