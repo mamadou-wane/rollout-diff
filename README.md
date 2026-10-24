@@ -53,6 +53,13 @@ Pass `--format verl` (and omit `--reward-column`) to analyze verl dumps. The ver
 
 `render` writes a self-contained local HTML file from the saved JSON report without rerunning analysis. Python callers can use `render_report(report)` to obtain the HTML text. The view provides searchable ranked events alongside expandable evidence and exemplar references. The CLI refuses to overwrite existing files.
 
+```sh
+.venv/bin/rolloutdiff inspect /path/to/completions --format trl --run experiment-1 \
+  --reward-column training_passed --report /path/to/report.json --event-rank 1
+```
+
+`inspect` resolves a saved event's selected exemplars against the original dump and prints responses locally with terminal controls escaped. It checks exact `(run, sample_id)` identity, step, prompt ID, and reward without rerunning analysis. Python callers can use `resolve_exemplars(report, rollouts, run="experiment-1", event_rank=1)` to obtain an event copy with a `response` field on each exemplar, or `None` for unselected records. Missing records and unsupported statuses remain explicit. Version 1 has no response fingerprint, so these checks cannot establish that the text is unchanged.
+
 ```mermaid
 flowchart LR
     A["TRL / verl rollout dumps"] --> B["rolloutdiff analyze"]
