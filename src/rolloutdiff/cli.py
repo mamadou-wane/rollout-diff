@@ -88,7 +88,48 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument(
         "--reward-column", type=_nonempty, action=_Once, help="TRL reward column"
     )
+    inspect.add_argument(
+        "--with-absent",
+        action="store_true",
+        help="compare each selected exemplar with a feature-absent sibling",
+    )
     return parser
+
+
+def _comparison(comparison: dict) -> list[str]:
+    lines = [
+        f"  Matched comparison: {_terminal(comparison['status'])}",
+        "  Descriptive same-prompt, same-step comparison.",
+    ]
+    if comparison["reason"] is not None:
+        lines.append(f"  Reason: {_terminal(comparison['reason'])}")
+    for field, label in (
+        ("n_rollouts", "Group completions"),
+        ("n_present", "Feature-present completions"),
+        ("n_absent", "Feature-absent completions"),
+        ("reward_present", "Present-group mean reward"),
+        ("reward_absent", "Absent-group mean reward"),
+        ("difference", "Present-minus-absent mean reward"),
+    ):
+        lines.append(f"  {label}: {_terminal(comparison[field])}")
+    counterpart = comparison["counterpart"]
+    if counterpart is None:
+        lines.append("  Matched response: Unavailable.")
+    else:
+        for field, label in (
+            ("run", "Matched run"),
+            ("sample_id", "Matched sample ID"),
+            ("step", "Matched step"),
+            ("prompt_id", "Matched prompt ID"),
+            ("reward", "Matched reward"),
+            ("feature_value", "Matched feature value"),
+        ):
+            lines.append(f"  {label}: {_terminal(counterpart[field])}")
+        lines.append("  Matched response (terminal controls escaped):")
+        lines.extend(
+            f"    {_terminal(line)}" for line in counterpart["response"].split("\n")
+        )
+    return lines
 
 
 def _inspection(event: dict) -> str:
@@ -125,6 +166,8 @@ def _inspection(event: dict) -> str:
                 ("reward_deviation", "Reward deviation"),
                 ("reward_deviation_status", "Reward deviation status"),
             ):
+                if field == "reward" and "comparison" in example:
+                    label = "Exemplar reward"
                 lines.append(f"  {label}: {_terminal(example[field])}")
             if example["response"] is None:
                 lines.append("  Response: Unavailable (no selected reference).")
@@ -134,6 +177,8 @@ def _inspection(event: dict) -> str:
                 lines.extend(
                     f"    {_terminal(line)}" for line in example["response"].split("\n")
                 )
+            if "comparison" in example:
+                lines.extend(_comparison(example["comparison"]))
     return "\n".join(lines)
 
 
@@ -177,7 +222,11 @@ def main(argv: list[str] | None = None) -> int:
                 else load_verl(args.input, run=args.run)
             )
             event = resolve_exemplars(
-                report, rollouts, run=args.run, event_rank=args.event_rank
+                report,
+                rollouts,
+                run=args.run,
+                event_rank=args.event_rank,
+                with_absent=args.with_absent,
             )
             print(_inspection(event))
             return 0

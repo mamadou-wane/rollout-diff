@@ -321,3 +321,175 @@ def test_inspect_cli_help_needs_no_input():
     assert "--report" in completed.stdout
     assert "--output" not in completed.stdout
     assert not completed.stderr
+
+
+@pytest.mark.parametrize("format", ["trl", "verl"])
+def test_inspect_cli_with_absent_resolves_both_responses_and_group_evidence(
+    cases, format
+):
+    source, report_path, report = cases[format]
+    before = report_path.read_bytes()
+    completed = _subprocess([*_arguments(source, report_path, format), "--with-absent"])
+    assert completed.returncode == 0, completed.stderr
+    assert not completed.stderr
+    assert "Matched comparison: available" in completed.stdout
+    assert "Group completions: 2" in completed.stdout
+    assert "Feature-present completions: 1" in completed.stdout
+    assert "Feature-absent completions: 1" in completed.stdout
+    assert "Exemplar reward: 2.0" in completed.stdout
+    assert "Present-group mean reward: 2.0" in completed.stdout
+    assert "Absent-group mean reward: 0.0" in completed.stdout
+    assert "Present-minus-absent mean reward: 2.0" in completed.stdout
+    assert "Matched reward: 0.0" in completed.stdout
+    assert "plain words." in completed.stdout
+    assert "private prompt sentinel" not in completed.stdout
+    for example in _selected(report["runs"][0]["events"][0]):
+        absent_id = example["sample_id"].rsplit(":", 1)[0] + ":1"
+        assert f"Matched sample ID: {absent_id}" in completed.stdout
+    assert report_path.read_bytes() == before
+    assert (
+        "Matched comparison"
+        not in _subprocess(_arguments(source, report_path, format)).stdout
+    )
+
+
+def test_inspect_cli_group_statistics_use_all_completions_and_match_without_reward_ranking(
+    tmp_path, cases
+):
+    source = _dump(tmp_path / "groups", "trl")
+    _, _, base_report = cases["trl"]
+    exemplar = _selected(base_report["runs"][0]["events"][0])[0]
+    file = source / f"completions_{exemplar['step']}.parquet"
+    frame = pd.read_parquet(file)
+    present = frame.loc[frame.sample_id.eq(exemplar["sample_id"])].iloc[0].to_dict()
+    absent_id = exemplar["sample_id"].rsplit(":", 1)[0] + ":1"
+    absent = frame.loc[frame.sample_id.eq(absent_id)].iloc[0].to_dict()
+    frame.loc[frame.sample_id.eq(absent_id), "reward"] = 10.0
+    additional = pd.DataFrame(
+        [
+            present | {"sample_id": "zz-present", "reward": 6.0},
+            absent | {"sample_id": "zz-absent", "reward": 0.0},
+        ]
+    )
+    frame = pd.concat([frame, additional], ignore_index=True)
+    frame.to_parquet(file, index=False)
+    report = build_report(analyze_rollouts(load_trl(source, run="experiment-1")))
+    report_path = _report(tmp_path, report)
+    arguments = [*_arguments(source, report_path), "--with-absent"]
+    completed = _subprocess(arguments)
+    assert completed.returncode == 0, completed.stderr
+    assert "Group completions: 4" in completed.stdout
+    assert "Feature-present completions: 2" in completed.stdout
+    assert "Feature-absent completions: 2" in completed.stdout
+    assert "Present-group mean reward: 4.0" in completed.stdout
+    assert "Absent-group mean reward: 5.0" in completed.stdout
+    assert "Present-minus-absent mean reward: -1.0" in completed.stdout
+    assert f"Matched sample ID: {absent_id}" in completed.stdout
+    assert "Matched reward: 10.0" in completed.stdout
+    assert "Matched sample ID: zz-absent" not in completed.stdout
+    frame.sample(frac=1, random_state=14).to_parquet(file, index=False)
+    shuffled = _subprocess(arguments)
+    assert shuffled.returncode == 0, shuffled.stderr
+    assert shuffled.stdout == completed.stdout
+
+
+def test_inspect_cli_feature_mismatch_fails_before_any_response_output(tmp_path, cases):
+    source = _dump(tmp_path / "feature-mismatch", "trl")
+    _, report_path, report = cases["trl"]
+    exemplar = _selected(report["runs"][0]["events"][0])[-1]
+    file = source / f"completions_{exemplar['step']}.parquet"
+    frame = pd.read_parquet(file)
+    frame.loc[frame.sample_id.eq(exemplar["sample_id"]), "completion"] = "plain words."
+    frame.to_parquet(file, index=False)
+    ordinary = _subprocess(_arguments(source, report_path))
+    assert ordinary.returncode == 0
+    completed = _subprocess([*_arguments(source, report_path), "--with-absent"])
+    assert completed.returncode == 1
+    assert not completed.stdout
+    assert "feature" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert "private completion sentinel" not in completed.stderr
+
+
+def test_inspect_cli_all_positive_group_keeps_unavailable_counterpart_explicit(
+    tmp_path, cases
+):
+    source = _dump(tmp_path / "positive", "trl")
+    _, report_path, report = cases["trl"]
+    exemplar = _selected(report["runs"][0]["events"][0])[0]
+    file = source / f"completions_{exemplar['step']}.parquet"
+    frame = pd.read_parquet(file)
+    frame.loc[frame.prompt_id.eq(exemplar["prompt_id"]), "completion"] = (
+        "def solve():\n    pass"
+    )
+    frame.to_parquet(file, index=False)
+    completed = _subprocess([*_arguments(source, report_path), "--with-absent"])
+    assert completed.returncode == 0, completed.stderr
+    assert "Matched comparison: unavailable" in completed.stdout
+    assert "Reason: no_absent_completion" in completed.stdout
+    assert "Feature-present completions: 2" in completed.stdout
+    assert "Feature-absent completions: 0" in completed.stdout
+    assert "Present-group mean reward: 1.0" in completed.stdout
+    assert "Absent-group mean reward: Unavailable" in completed.stdout
+    assert "Present-minus-absent mean reward: Unavailable" in completed.stdout
+
+
+def test_inspect_cli_with_absent_preserves_unsupported_and_missing_records(
+    tmp_path, cases
+):
+    source, report_path, report = cases["trl"]
+    contextual = next(
+        event
+        for event in report["runs"][0]["events"]
+        if event["representative_feature"] == "scalar:reward"
+    )
+    completed = _subprocess(
+        [*_arguments(source, report_path, rank=contextual["rank"]), "--with-absent"]
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Reason: unsupported_kind" in completed.stdout
+    assert "Feature-present completions: Unavailable" in completed.stdout
+    assert "private completion sentinel" not in completed.stdout
+    missing = copy.deepcopy(report)
+    for member in missing["runs"][0]["events"][0]["members"]:
+        member["exemplar_status"] = "missing"
+        member["exemplars"] = []
+    completed = _subprocess(
+        [*_arguments(source, _report(tmp_path, missing)), "--with-absent"]
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "No exemplar records" in completed.stdout
+    assert "Exemplar records: missing" in completed.stdout
+    assert "private completion sentinel" not in completed.stdout
+
+
+def test_inspect_cli_escapes_matched_response_and_identity(tmp_path, cases):
+    source = _dump(tmp_path / "matched-controls", "trl")
+    _, report_path, report = cases["trl"]
+    exemplar = _selected(report["runs"][0]["events"][0])[0]
+    absent_id = exemplar["sample_id"].rsplit(":", 1)[0] + ":1"
+    file = source / f"completions_{exemplar['step']}.parquet"
+    frame = pd.read_parquet(file)
+    mask = frame.sample_id.eq(absent_id)
+    frame.loc[mask, "sample_id"] = absent_id + "\x1b[2J\r\u202e"
+    frame.loc[mask, "completion"] = "café absent\nnext\x1b[31m\r\x9b\u2028\x00"
+    frame.to_parquet(file, index=False)
+    completed = _subprocess([*_arguments(source, report_path), "--with-absent"])
+    assert completed.returncode == 0, completed.stderr
+    assert all(char == "\n" or char.isprintable() for char in completed.stdout)
+    assert "    café absent\n    next" in completed.stdout
+    assert f"Matched sample ID: {absent_id}" + r"\x1b[2J\r\u202e" in completed.stdout
+    assert r"\x1b[31m\r\x9b\u2028\x00" in completed.stdout
+
+
+def test_inspect_cli_with_absent_does_not_run_analysis(cases, monkeypatch, capsys):
+    from rolloutdiff import cli
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("matched inspection must not run analysis or build a report")
+
+    monkeypatch.setattr(cli, "analyze_rollouts", unexpected)
+    monkeypatch.setattr(cli, "build_report", unexpected)
+    source, report_path, _ = cases["trl"]
+    assert cli.main([*_arguments(source, report_path), "--with-absent"]) == 0
+    assert "Matched comparison: available" in capsys.readouterr().out

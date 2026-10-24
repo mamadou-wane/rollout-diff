@@ -60,6 +60,8 @@ Pass `--format verl` (and omit `--reward-column`) to analyze verl dumps. The ver
 
 `inspect` resolves a saved event's selected exemplars against the original dump and prints responses locally with terminal controls escaped. It checks exact `(run, sample_id)` identity, step, prompt ID, and reward without rerunning analysis. Python callers can use `resolve_exemplars(report, rollouts, run="experiment-1", event_rank=1)` to obtain an event copy with a `response` field on each exemplar, or `None` for unselected records. Missing records and unsupported statuses remain explicit. Version 1 has no response fingerprint, so these checks cannot establish that the text is unchanged.
 
+Pass `--with-absent` (`with_absent=True` in Python) to attach a within-group `comparison` to each exemplar. For selected binary exemplars, inspection verifies feature presence and pairs each exemplar with a feature-absent completion from the same run, step, and prompt, selecting the lexically smallest sample ID regardless of reward. Summary statistics (counts, group mean rewards, and present-minus-absent difference) are computed over the full group. Supply complete groups; saved group sizes are checked when available. When every completion has the feature, the comparison is marked unavailable.
+
 ```mermaid
 flowchart LR
     A["TRL / verl rollout dumps"] --> B["rolloutdiff analyze"]
