@@ -62,6 +62,8 @@ Pass `--format verl` (and omit `--reward-column`) to analyze verl dumps. The ver
 
 Pass `--with-absent` (`with_absent=True` in Python) to attach a within-group `comparison` to each exemplar. For selected binary exemplars, inspection verifies feature presence and pairs each exemplar with a feature-absent completion from the same run, step, and prompt, selecting the lexically smallest sample ID regardless of reward. Summary statistics (counts, group mean rewards, and present-minus-absent difference) are computed over the full group. Supply complete groups; saved group sizes are checked when available. When every completion has the feature, the comparison is marked unavailable.
 
+New analyses use `defines_test_token` for function names containing a whole `test` or `tests` component, split at underscores and ASCII camel-case/acronym boundaries. This static naming indicator covers nested functions, methods, and async definitions. Historical `defines_test_named` reports retain substring matching for every inspected group member.
+
 ```mermaid
 flowchart LR
     A["TRL / verl rollout dumps"] --> B["rolloutdiff analyze"]

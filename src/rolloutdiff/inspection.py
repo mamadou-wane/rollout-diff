@@ -60,7 +60,15 @@ def _comparisons(event: dict, lookup: dict) -> None:
             if key not in extracted:
                 extracted[key] = extract(row["response"])
             features = extracted[key]
-            if feature in features.dense:
+            if feature == "defines_test_named":
+                # Historical reports use substring matching on parsed definitions.
+                value = float(
+                    any(
+                        name.startswith("def:") and "test" in name[4:].lower()
+                        for name in features.sparse
+                    )
+                )
+            elif feature in features.dense:
                 if feature not in DENSE_BINARY:
                     raise ValueError(
                         "reported binary feature is not binary in extractor"
@@ -140,6 +148,7 @@ def resolve_exemplars(
     groups, choosing the absent counterpart by lexically smallest sample ID. Supply all
     group completions; saved group sizes are checked when available. Comparisons
     are descriptive. Inputs are unchanged; version 1 has no response fingerprint.
+    Historical defines_test_named uses substring matching for the entire group.
     """
     if type(with_absent) is not bool:
         raise ValueError("with_absent must be a boolean")

@@ -95,6 +95,30 @@ def test_all_retained_features_receive_both_detectors_and_evidence_rows():
     assert target.prompt_length_distance == 0
 
 
+def test_pipeline_emits_only_the_token_indicator_and_detects_its_change():
+    data = fixture()
+    data["response"] = data.response.replace(
+        {
+            "def solve():\n    pass": "def runTests():\n    pass",
+            "plain words.": "def shortestPath():\n    pass",
+        }
+    )
+    result = analyze(data)
+    for table in (
+        result.features.catalog,
+        result.aggregation.series,
+        result.sequential.diagnostics,
+        result.retrospective.diagnostics,
+        result.evidence,
+    ):
+        assert set(table.feature[table.feature.str.startswith("defines_test")]) == {
+            "defines_test_token"
+        }
+    target = row(result, "defines_test_token")
+    assert (target.onset_step, target.alert_step, target.changepoint_step) == (4, 6, 4)
+    assert target.replication_status == "replicated"
+
+
 @pytest.mark.parametrize("feature", ["def:solve", "scalar:reward", "has_code"])
 def test_integrated_evidence_agrees_with_existing_public_functions(feature):
     data = fixture()

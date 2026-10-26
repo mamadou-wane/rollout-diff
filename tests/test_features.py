@@ -39,12 +39,102 @@ def test_plain_prose_survives_without_code():
 
 def test_valid_block_survives_an_independent_invalid_block():
     result = features.extract(
-        "```python\ndef solve():\n    return 1\n```\n```python\ndef broken(\n```"
+        "```python\ndef run_tests():\n    return 1\n```\n```python\ndef broken(\n```"
     )
     assert result.dense["code_parse_fail"] == 1
     assert result.dense["n_code_blocks"] == 2
     assert result.dense["n_funcdefs"] == 1
-    assert "def:solve" in result.sparse
+    assert "def:run_tests" in result.sparse
+    assert result.dense.get("defines_test_token") == 1
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("test_case", 1),
+        ("test_solution", 1),
+        ("run_tests", 1),
+        ("testCase", 1),
+        ("HTTPTests", 1),
+        ("run2Tests", 1),
+        ("TESTCase", 1),
+        ("TEST_CASE", 1),
+        ("test_2", 1),
+        ("shortestPath", 0),
+        ("latest", 0),
+        ("contest", 0),
+        ("testify", 0),
+        ("test2", 0),
+        ("test2Case", 0),
+        ("testcase", 0),
+        ("TESTcase", 0),
+        ("βTest", 0),
+        ("findRotateSteps", 0),
+        ("deleteString", 0),
+        ("findMaxConsecutiveOnesInfiniteStream", 0),
+        ("solve", 0),
+    ],
+)
+def test_test_indicator_requires_a_complete_name_token_and_preserves_sparse_names(
+    name, expected
+):
+    result = features.extract(f"def {name}():\n    pass\n")
+    assert result.dense.get("defines_test_token") == expected
+    assert result.dense["n_funcdefs"] == 1
+    assert result.sparse == {f"def:{name}"}
+
+
+@pytest.mark.parametrize(
+    "response, count",
+    [
+        ("def outer():\n    def test_case():\n        pass", 2),
+        ("class Suite:\n    def test_case(self):\n        pass", 1),
+        ("async def test_case():\n    pass", 1),
+        ("async def outer():\n    async def test_case():\n        pass", 2),
+        ("if False:\n    def test_case():\n        return 42", 1),
+    ],
+)
+def test_test_token_counts_parsed_definitions_in_all_scopes(response, count):
+    result = features.extract(response)
+    assert result.dense.get("defines_test_token") == 1
+    assert result.dense["n_funcdefs"] == count
+    assert "def:test_case" in result.sparse
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "class TestCase:\n    pass",
+        "run_tests()",
+        "# def test_case(): pass",
+        'text = "def test_case(): pass"',
+        "```javascript\ndef test_case(): pass\n```",
+        "<think>def test_case(): pass</think>",
+        "<thinking>def test_case(): pass</thinking>",
+        "def helper():\n    assert True",
+        "```python\ndef test_case(\n```",
+    ],
+)
+def test_test_token_ignores_non_definitions_and_unparsed_regions(response):
+    result = features.extract(response)
+    assert result.dense.get("defines_test_token") == 0
+    assert "def:test_case" not in result.sparse
+
+
+def test_test_token_is_the_only_test_indicator_in_dense_output_and_catalog():
+    result = features.featurize(
+        rows(
+            ("run", 0, "a", "p", "def run_tests():\n    pass", 0),
+            ("run", 0, "b", "p", "def shortestPath():\n    pass", 0),
+        )
+    )
+    assert result.dense.filter(like="defines_test").to_dict("list") == {
+        "defines_test_token": [1, 0]
+    }
+    catalog = result.catalog.loc[result.catalog.feature.str.startswith("defines_test")]
+    assert catalog.to_dict("records") == [
+        {"feature": "defines_test_token", "tier": "structural", "kind": "binary"}
+    ]
 
 
 def test_file_wrappers_and_headers_share_a_vocabulary_without_double_counting():

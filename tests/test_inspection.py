@@ -463,3 +463,99 @@ def test_with_absent_requires_boolean(case, value):
     data, _, report = case
     with pytest.raises(ValueError, match="with_absent"):
         resolve(report, data, with_absent=value)
+
+
+def _test_name_case(case):
+    data, _, report = case
+    names = {
+        "def:solve": "defines_test_named",
+        "has_code": "defines_test_token",
+    }
+
+    def rename(value):
+        if isinstance(value, dict):
+            return {key: rename(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rename(item) for item in value]
+        return names.get(value, value) if isinstance(value, str) else value
+
+    report = rename(report)
+    data = data.copy(deep=True)
+    data.loc[data.response.eq("def solve():\n    pass"), "response"] = (
+        "def run_tests():\n    pass"
+    )
+    sibling = data.loc[data.sample_id.eq("table:37")].iloc[0].to_dict()
+    data.loc[data.sample_id.eq("table:37"), "response"] = (
+        "def shortestPath():\n    pass"
+    )
+    data = pd.concat(
+        [data, pd.DataFrame([dict(sibling, sample_id="z-plain", reward=4.0)])],
+        ignore_index=True,
+    )
+    for example in examples(report["runs"][0]["events"][0]):
+        if example["sample_id"] == "table:36":
+            example.update(
+                reward_group_size=3, reward_group_mean=2.0, reward_deviation=0.0
+            )
+    return data, report
+
+
+def test_historical_and_token_features_partition_every_sibling_separately(case):
+    data, report = _test_name_case(case)
+    before_data, before_report = data.copy(deep=True), copy.deepcopy(report)
+    encoded, rendered = report_json(report), render_report(report)
+    ordinary = resolve(report, data)
+    matched = resolve(report, data, with_absent=True)
+    comparisons = {
+        member["feature"]: member["exemplars"][0]["comparison"]
+        for member in matched["members"]
+    }
+    legacy, token = (
+        comparisons["defines_test_named"],
+        comparisons["defines_test_token"],
+    )
+    assert (legacy["n_present"], legacy["n_absent"]) == (2, 1)
+    assert (legacy["reward_present"], legacy["reward_absent"]) == (1.0, 4.0)
+    assert legacy["difference"] == -3.0
+    assert legacy["counterpart"]["sample_id"] == "z-plain"
+    assert (token["n_present"], token["n_absent"]) == (1, 2)
+    assert (token["reward_present"], token["reward_absent"]) == (2.0, 2.0)
+    assert token["difference"] == 0.0
+    assert token["counterpart"]["sample_id"] == "table:37"
+    shuffled = data.sample(frac=1, random_state=31)
+    shuffled.index = [0] * len(shuffled)
+    assert resolve(report, shuffled, with_absent=True) == matched
+    for example in examples(matched):
+        del example["comparison"]
+    assert matched == ordinary
+    assert_frame_equal(data, before_data)
+    assert report == before_report
+    assert report_json(report) == encoded
+    assert render_report(report) == rendered
+
+
+@pytest.mark.parametrize(
+    "response, present",
+    [
+        ("def shortestPath():\n    pass", True),
+        ("class Solution:\n    async def contest(self):\n        pass", True),
+        ("def helper():\n    def latest():\n        pass", True),
+        ("<think>def contest():\n    pass</think>plain words.", False),
+        ('text = "def contest(): pass"', False),
+        ("```python\ndef contest(\n```", False),
+        ("contest()", False),
+    ],
+)
+def test_historical_presence_uses_parsed_definitions(case, response, present):
+    data, report = _test_name_case(case)
+    event = report["runs"][0]["events"][0]
+    token = next(m for m in event["members"] if m["feature"] == "defines_test_token")
+    token.update(exemplar_status="missing", exemplars=[])
+    data.loc[data.sample_id.eq("table:36"), "response"] = response
+    assert resolve(report, data)["members"][0]["exemplars"][0]["response"] == response
+    if present:
+        matched = resolve(report, data, with_absent=True)
+        assert matched["members"][0]["exemplars"][0]["comparison"]["n_present"] == 2
+    else:
+        with pytest.raises(ValueError, match="feature does not match"):
+            resolve(report, data, with_absent=True)

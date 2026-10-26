@@ -54,6 +54,24 @@ def _report(tmp_path, value):
     return path
 
 
+def _named_feature_report(report, feature):
+    candidate = copy.deepcopy(report)
+
+    def rename(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"feature", "representative_feature"} and item == "def:solve":
+                    value[key] = feature
+                else:
+                    rename(item)
+        elif isinstance(value, list):
+            for item in value:
+                rename(item)
+
+    rename(candidate)
+    return candidate
+
+
 @pytest.mark.parametrize("format", ["trl", "verl"])
 def test_inspect_cli_resolves_real_alerts_without_exporting_or_modifying_reports(
     cases, format
@@ -411,6 +429,55 @@ def test_inspect_cli_feature_mismatch_fails_before_any_response_output(tmp_path,
     assert "private completion sentinel" not in completed.stderr
 
 
+@pytest.mark.parametrize(
+    "feature,name,valid",
+    [
+        ("defines_test_named", "shortestPath", True),
+        ("defines_test_named", "contest", True),
+        ("defines_test_token", "testCase", True),
+        ("defines_test_token", "shortestPath", False),
+        ("defines_test_token", "contest", False),
+    ],
+)
+def test_inspect_cli_validates_named_feature_semantics_without_changing_report(
+    tmp_path, cases, feature, name, valid
+):
+    source = _dump(tmp_path / "named-feature", "trl")
+    candidate = _named_feature_report(cases["trl"][2], feature)
+    selected = _selected(candidate["runs"][0]["events"][0])
+    last_id = selected[-1]["sample_id"]
+    for step in {example["step"] for example in selected}:
+        file = source / f"completions_{step}.parquet"
+        frame = pd.read_parquet(file)
+        frame["completion"] = frame.completion.str.replace(
+            "def solve():", f"def {name if valid else 'testCase'}():", regex=False
+        )
+        if not valid:
+            frame.loc[frame.sample_id.eq(last_id), "completion"] = (
+                f"def {name}():\n    pass\n# private completion sentinel"
+            )
+        frame.to_parquet(file, index=False)
+    report_path = _report(tmp_path, candidate)
+    before = report_path.read_bytes()
+    ordinary = _subprocess(_arguments(source, report_path))
+    assert ordinary.returncode == 0, ordinary.stderr
+    assert f"def {name}():" in ordinary.stdout
+    assert "Matched comparison" not in ordinary.stdout
+    completed = _subprocess([*_arguments(source, report_path), "--with-absent"])
+    assert completed.returncode == (0 if valid else 1), completed.stderr
+    if valid:
+        assert "Matched comparison: available" in completed.stdout
+        assert "Feature-present completions: 1" in completed.stdout
+        assert "Feature-absent completions: 1" in completed.stdout
+        assert "Matched reward: 0.0" in completed.stdout
+    else:
+        assert not completed.stdout
+        assert "feature" in completed.stderr
+        assert "Traceback" not in completed.stderr
+        assert "private completion sentinel" not in completed.stderr
+    assert report_path.read_bytes() == before
+
+
 def test_inspect_cli_all_positive_group_keeps_unavailable_counterpart_explicit(
     tmp_path, cases
 ):
@@ -463,23 +530,57 @@ def test_inspect_cli_with_absent_preserves_unsupported_and_missing_records(
     assert "private completion sentinel" not in completed.stdout
 
 
-def test_inspect_cli_escapes_matched_response_and_identity(tmp_path, cases):
+@pytest.mark.parametrize(
+    "feature,name",
+    [
+        ("def:solve", "solve"),
+        ("defines_test_named", "shortestPath"),
+        ("defines_test_token", "testCase"),
+    ],
+)
+def test_inspect_cli_escapes_both_responses_and_identities(
+    tmp_path, cases, feature, name
+):
     source = _dump(tmp_path / "matched-controls", "trl")
-    _, report_path, report = cases["trl"]
-    exemplar = _selected(report["runs"][0]["events"][0])[0]
-    absent_id = exemplar["sample_id"].rsplit(":", 1)[0] + ":1"
+    candidate = _named_feature_report(cases["trl"][2], feature)
+    selected = _selected(candidate["runs"][0]["events"][0])
+    exemplar = selected[0]
+    present_id = exemplar["sample_id"]
+    absent_id = present_id.rsplit(":", 1)[0] + ":1"
+    for step in {example["step"] for example in selected}:
+        file = source / f"completions_{step}.parquet"
+        frame = pd.read_parquet(file)
+        frame["completion"] = frame.completion.str.replace(
+            "def solve():", f"def {name}():", regex=False
+        )
+        frame.to_parquet(file, index=False)
     file = source / f"completions_{exemplar['step']}.parquet"
     frame = pd.read_parquet(file)
+    mask = frame.sample_id.eq(present_id)
+    frame.loc[mask, "sample_id"] = present_id + "\x1b[2J\r\u202e"
+    frame.loc[mask, "completion"] = (
+        f"```python\ndef {name}():\n    pass\n```\n"
+        "café present\nnext\x1b[32m\r\x9b\u2028\x00"
+    )
+    for example in selected:
+        if example["sample_id"] == present_id:
+            example["sample_id"] += "\x1b[2J\r\u202e"
     mask = frame.sample_id.eq(absent_id)
     frame.loc[mask, "sample_id"] = absent_id + "\x1b[2J\r\u202e"
     frame.loc[mask, "completion"] = "café absent\nnext\x1b[31m\r\x9b\u2028\x00"
     frame.to_parquet(file, index=False)
+    report_path = _report(tmp_path, candidate)
+    before = report_path.read_bytes()
     completed = _subprocess([*_arguments(source, report_path), "--with-absent"])
     assert completed.returncode == 0, completed.stderr
     assert all(char == "\n" or char.isprintable() for char in completed.stdout)
+    assert "    café present\n    next" in completed.stdout
     assert "    café absent\n    next" in completed.stdout
+    assert present_id + r"\x1b[2J\r\u202e" in completed.stdout
     assert f"Matched sample ID: {absent_id}" + r"\x1b[2J\r\u202e" in completed.stdout
+    assert r"\x1b[32m\r\x9b\u2028\x00" in completed.stdout
     assert r"\x1b[31m\r\x9b\u2028\x00" in completed.stdout
+    assert report_path.read_bytes() == before
 
 
 def test_inspect_cli_with_absent_does_not_run_analysis(cases, monkeypatch, capsys):

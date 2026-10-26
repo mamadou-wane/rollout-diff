@@ -135,7 +135,7 @@ _AST_FLAGS = (
     "file_read",
     "defines_cmp_dunder",
     "defines_any_dunder",
-    "defines_test_named",
+    "defines_test_token",
     "module_attr_assign",
     "has_main_guard",
     "top_level_call",
@@ -502,6 +502,12 @@ def _call_features(
         flags["file_read"] = 1.0
 
 
+def _has_test_token(name: str) -> bool:
+    parts = re.sub(r"([A-Z])([A-Z][a-z])", r"\1_\2", name)
+    parts = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", parts)
+    return any(part.lower() in {"test", "tests"} for part in parts.split("_"))
+
+
 def _ast_features(trees: list[ast.Module], sparse: set[str]) -> dict[str, float]:
     counts = Counter()
     flags = dict.fromkeys(_AST_FLAGS, 0.0)
@@ -516,8 +522,8 @@ def _ast_features(trees: list[ast.Module], sparse: set[str]) -> dict[str, float]
                     flags["defines_any_dunder"] = 1.0
                     if name in _CMP_DUNDERS:
                         flags["defines_cmp_dunder"] = 1.0
-                if "test" in name.lower():
-                    flags["defines_test_named"] = 1.0
+                if _has_test_token(name):
+                    flags["defines_test_token"] = 1.0
                 if name in _BUILTINS_LIKE:
                     flags["overrides_builtin_name"] = 1.0
             elif isinstance(node, ast.ClassDef):
