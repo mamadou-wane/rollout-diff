@@ -10,6 +10,7 @@ from .adapters import load_trl, load_verl
 from .html_report import load_report, render_report
 from .inspection import resolve_exemplars
 from .pipeline import analyze_rollouts
+from .replay import SandboxConfig, replay_aria, serialize_replay
 from .report import _check_output_path, _write_text, build_report, write_report
 
 
@@ -92,6 +93,32 @@ def _parser() -> argparse.ArgumentParser:
         "--with-absent",
         action="store_true",
         help="compare each selected exemplar with a feature-absent sibling",
+    )
+    replay = commands.add_parser(
+        "replay-aria",
+        help="explicitly replay one pinned Aria completion",
+        allow_abbrev=False,
+    )
+    replay.add_argument("input", type=_nonempty, help="checksum-pinned Aria parquet")
+    for name in (
+        "run",
+        "sample-id",
+        "response-sha256",
+        "artifacts",
+        "docker-host",
+        "output",
+    ):
+        replay.add_argument("--" + name, required=True, type=_nonempty, action=_Once)
+    replay.add_argument(
+        "--image",
+        type=_nonempty,
+        action=_Once,
+        help="immutable local Python image SHA-256",
+    )
+    replay.add_argument(
+        "--allow-execution",
+        action="store_true",
+        help="authorize disposable container execution for this completion",
     )
     return parser
 
@@ -214,6 +241,31 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.error("--reward-column is supported only with --format trl")
     try:
+        if args.command == "replay-aria":
+            output = Path(args.output)
+            _check_output_path(output)
+            options = {"docker_host": args.docker_host}
+            if args.image is not None:
+                options["image"] = args.image
+            record = replay_aria(
+                args.input,
+                run=args.run,
+                sample_id=args.sample_id,
+                response_sha256=args.response_sha256,
+                artifacts=args.artifacts,
+                config=SandboxConfig(**options),
+                execution_authorized=args.allow_execution,
+            )
+            _write_text(serialize_replay(record), output)
+            print(
+                f"Replay: historical={record['historical']['status']}; task={record['task']['status']}; mechanism={record['mechanism_status']}."
+            )
+            return (
+                0
+                if record["historical"]["status"] == "reported"
+                and record["task"]["determinate"]
+                else 1
+            )
         if args.command == "inspect":
             report = load_report(args.report)
             rollouts = (
@@ -244,7 +296,9 @@ def main(argv: list[str] | None = None) -> int:
             report = build_report(analyze_rollouts(rollouts), run=args.run)
             write_report(report, output)
     except (OSError, ValueError) as exc:
-        message = _terminal(exc) if args.command == "inspect" else str(exc)
+        message = (
+            _terminal(exc) if args.command in {"inspect", "replay-aria"} else str(exc)
+        )
         print(f"rolloutdiff: error: {message}", file=sys.stderr)
         return 1
     if args.command == "analyze":
