@@ -14,6 +14,13 @@ from .exemplars import select_exemplars
 from .features import FeatureTables, RolloutFeatures, extract, featurize
 from .html_report import render_report
 from .inspection import resolve_exemplars
+from .investigation import (
+    approve_aria_intervention,
+    compare_aria_intervention,
+    execute_aria_intervention,
+    prepare_aria_intervention,
+    render_aria_comparison,
+)
 from .pipeline import AnalysisResult, analyze_rollouts
 from .prompt_mix import PromptMixEvidence, prompt_mix
 from .ranking import rank_events
@@ -41,10 +48,13 @@ __all__ = [
     "SandboxConfig",
     "aggregate",
     "analyze_rollouts",
+    "approve_aria_intervention",
     "build_report",
+    "compare_aria_intervention",
     "detect_retrospective",
     "detect_sequential",
     "event_window_corroboration",
+    "execute_aria_intervention",
     "extract",
     "featurize",
     "from_table",
@@ -52,8 +62,10 @@ __all__ = [
     "load_trl",
     "load_verl",
     "persistence",
+    "prepare_aria_intervention",
     "prompt_mix",
     "rank_events",
+    "render_aria_comparison",
     "render_report",
     "replay_aria",
     "resolve_exemplars",

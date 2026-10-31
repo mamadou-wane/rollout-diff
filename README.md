@@ -83,6 +83,8 @@ Set `RESPONSE_SHA256` to the selected response's SHA-256 hash.
 
 The JSON result includes host-side task-test comparisons and historical evaluator claims marked as untrusted.
 
+The opt-in `investigate-aria` workflow supports preparing and comparing controlled interventions against frozen Aria replay evidence. Execution requires explicit, single-use authorization. Run `rolloutdiff investigate-aria --help` for available commands.
+
 ## Inputs
 
 | Loader | Accepted input |

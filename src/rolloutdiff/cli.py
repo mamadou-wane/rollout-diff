@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from .adapters import load_trl, load_verl
 from .html_report import load_report, render_report
 from .inspection import resolve_exemplars
+from .investigation import (
+    approve_aria_intervention,
+    compare_aria_intervention,
+    execute_aria_intervention,
+    prepare_aria_intervention,
+    render_aria_comparison,
+)
 from .pipeline import analyze_rollouts
-from .replay import SandboxConfig, replay_aria, serialize_replay
+from .replay import SandboxConfig, _json_output, replay_aria, serialize_replay
 from .report import _check_output_path, _write_text, build_report, write_report
 
 
@@ -120,7 +128,122 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="authorize disposable container execution for this completion",
     )
+    _investigation_parser(commands)
     return parser
+
+
+def _investigation_parser(commands):
+    investigation = commands.add_parser(
+        "investigate-aria",
+        help="prepare and compare one Aria intervention",
+        allow_abbrev=False,
+    )
+    actions = investigation.add_subparsers(dest="investigation_action", required=True)
+    prepare = actions.add_parser(
+        "prepare", help="freeze a control and one exact edit", allow_abbrev=False
+    )
+    prepare.add_argument("control", type=_nonempty)
+    for name in (
+        "source",
+        "artifacts",
+        "edit",
+        "hypothesis",
+        "predictions",
+        "docker-host",
+        "output",
+    ):
+        prepare.add_argument("--" + name, required=True, type=_nonempty, action=_Once)
+    approve = actions.add_parser(
+        "approve", help="record case-specific execution approval", allow_abbrev=False
+    )
+    approve.add_argument("case", type=_nonempty)
+    for name in ("case-sha256", "variant-sha256"):
+        approve.add_argument("--" + name, required=True, type=_nonempty, action=_Once)
+    approve.add_argument(
+        "--max-containers", required=True, type=_positive_integer, action=_Once
+    )
+    approve.add_argument("--allow-execution", action="store_true")
+    run = actions.add_parser(
+        "run", help="consume approval and execute once", allow_abbrev=False
+    )
+    run.add_argument("case", type=_nonempty)
+    for name in ("source", "artifacts"):
+        run.add_argument("--" + name, required=True, type=_nonempty, action=_Once)
+    run.add_argument("--allow-execution", action="store_true")
+    compare = actions.add_parser(
+        "compare", help="compare saved evidence without execution", allow_abbrev=False
+    )
+    compare.add_argument("case", type=_nonempty)
+    compare.add_argument("result", type=_nonempty)
+    compare.add_argument("--provenance", type=_nonempty, action=_Once)
+    for name in ("output", "html"):
+        compare.add_argument("--" + name, required=True, type=_nonempty, action=_Once)
+
+
+def _json_object(path):
+    value = _json_output(Path(path).read_bytes())
+    if type(value) is not dict:
+        raise ValueError("input must be a valid JSON object without duplicate members")
+    return value
+
+
+def _investigation(args):
+    if args.investigation_action == "prepare":
+        output = Path(args.output)
+        _check_output_path(output)
+        case = prepare_aria_intervention(
+            args.control,
+            args.source,
+            artifacts=args.artifacts,
+            edit=_json_object(args.edit),
+            hypothesis=args.hypothesis,
+            predictions=_json_object(args.predictions),
+            directory=output,
+            config=SandboxConfig(docker_host=args.docker_host),
+        )
+        print(f"Case SHA-256: {_terminal(case['case_sha256'])}")
+        print(f"Variant SHA-256: {_terminal(case['variant_response_sha256'])}")
+        print(
+            "Prepared without execution. Inspect the case and source diff before approval."
+        )
+        return 0
+    if args.investigation_action == "approve":
+        approve_aria_intervention(
+            args.case,
+            case_sha256=args.case_sha256,
+            variant_sha256=args.variant_sha256,
+            max_containers=args.max_containers,
+            execution_authorized=args.allow_execution,
+        )
+        print("Case-specific approval recorded. Execution has not started.")
+        return 0
+    if args.investigation_action == "run":
+        comparison = execute_aria_intervention(
+            args.case,
+            args.source,
+            artifacts=args.artifacts,
+            execution_authorized=args.allow_execution,
+        )
+        print(
+            f"Investigation: {_terminal(comparison['status'])}. Historical claims remain untrusted."
+        )
+        return 1 if comparison["status"] == "stopped" else 0
+    output, html = Path(args.output), Path(args.html)
+    if output.resolve() == html.resolve():
+        raise ValueError("JSON and HTML output paths must be distinct")
+    _check_output_path(output)
+    _check_output_path(html)
+    comparison = compare_aria_intervention(
+        args.case, args.result, provenance=args.provenance
+    )
+    rendered = render_aria_comparison(comparison)
+    serialized = (
+        json.dumps(comparison, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    )
+    _write_text(serialized, output)
+    _write_text(rendered, html)
+    print("Comparison saved. Historical claims remain untrusted.")
+    return 0
 
 
 def _comparison(comparison: dict) -> list[str]:
@@ -241,6 +364,8 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.error("--reward-column is supported only with --format trl")
     try:
+        if args.command == "investigate-aria":
+            return _investigation(args)
         if args.command == "replay-aria":
             output = Path(args.output)
             _check_output_path(output)
@@ -297,7 +422,9 @@ def main(argv: list[str] | None = None) -> int:
             write_report(report, output)
     except (OSError, ValueError) as exc:
         message = (
-            _terminal(exc) if args.command in {"inspect", "replay-aria"} else str(exc)
+            _terminal(exc)
+            if args.command in {"inspect", "replay-aria", "investigate-aria"}
+            else str(exc)
         )
         print(f"rolloutdiff: error: {message}", file=sys.stderr)
         return 1
