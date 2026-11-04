@@ -57,6 +57,7 @@ def historical(passed=1):
         "oom": False,
         "stdout": {
             "tests_evaluated": 1,
+            "tests_total": 1,
             "tests_passed": passed,
             "test_errors": [] if passed else ["AssertionError: fixture"],
         },

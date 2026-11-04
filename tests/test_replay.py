@@ -1,8 +1,10 @@
 import hashlib
 import json
+from dataclasses import replace
 
 import pandas as pd
 import pytest
+from test_investigation import raw_result
 
 from rolloutdiff import replay as module
 from rolloutdiff._replay_container import ContainerResult, SandboxConfig
@@ -154,18 +156,19 @@ def test_mixed_incomplete_answers_preserve_comparisons_without_a_verdict(
         "compiled": True,
         "timeout": False,
         "oom": False,
-        "stdout": {"tests_evaluated": 1, "tests_passed": 1},
+        "stdout": {
+            "tests_evaluated": 1,
+            "tests_passed": 1,
+            "tests_total": 1,
+            "test_errors": [],
+        },
     }
-    outputs = iter([historical, payload])
+    outputs = iter([raw_result(historical), raw_result(payload, 1)])
     monkeypatch.setattr(module, "historical_script", lambda *a: ("unused", b""))
 
     def run(*args, execution_authorized):
         assert execution_authorized is True
-        return ContainerResult(
-            "completed",
-            stdout=json.dumps(next(outputs)).encode(),
-            cleanup_verified=True,
-        )
+        return next(outputs)
 
     monkeypatch.setattr(module, "run_container", run)
     result = module._replay_response(source, task, {}, SandboxConfig())
@@ -317,19 +320,17 @@ def test_expected_answers_never_enter_worker_and_no_raw_text_leaves_record(monke
                 "compiled": True,
                 "timeout": False,
                 "oom": False,
-                "stdout": {"tests_evaluated": 1, "tests_passed": 1},
+                "stdout": {
+                    "tests_evaluated": 1,
+                    "tests_passed": 1,
+                    "tests_total": 1,
+                    "test_errors": [],
+                },
             }
             if len(payloads) == 1
             else answer(["str", "wrong"])
         )
-        return ContainerResult(
-            "completed",
-            exit_code=0,
-            stdout=json.dumps(output).encode(),
-            stderr=b"private diagnostic text",
-            config_verified=True,
-            cleanup_verified=True,
-        )
+        return raw_result(output, len(payloads) - 1, stderr=b"private diagnostic text")
 
     monkeypatch.setattr(module, "run_container", run)
     result = module._replay_response(source, task, {}, SandboxConfig())
@@ -471,13 +472,7 @@ def test_compile_failure_claim_keeps_protected_assessment_independent(
 
     def transport(script, payload, config, *, execution_authorized):
         calls.append(script)
-        return ContainerResult(
-            "completed",
-            exit_code=0,
-            stdout=next(outputs),
-            config_verified=True,
-            cleanup_verified=True,
-        )
+        return replace(raw_result(None, len(calls) - 1), stdout=next(outputs))
 
     monkeypatch.setattr(module, "run_container", transport)
     record = module._replay_response(
@@ -498,3 +493,275 @@ def test_duplicate_compile_failure_flags_remain_invalid_protocol():
     result = module._historical_report(ContainerResult("completed", stdout=raw))
     assert result["status"] == "unresolved" and result["reported_result"] is None
     assert result.get("reason") != "reported_compile_failure"
+
+
+def failure_report(**overrides):
+    return {
+        "success": False,
+        "compiled": True,
+        "timeout": False,
+        "oom": False,
+        "stdout": {},
+        **overrides,
+    }
+
+
+@pytest.mark.parametrize(
+    "payload,reason",
+    [
+        (failure_report(compiled=False), "reported_compile_failure"),
+        (
+            failure_report(
+                stdout={
+                    "raw": "unsupported operand type(s) for *: 'int' and 'ellipsis'"
+                }
+            ),
+            "reported_runtime_error",
+        ),
+        (failure_report(stdout={"raw": ""}), "reported_runtime_error"),
+        (failure_report(timeout=True), "reported_inner_timeout"),
+        (failure_report(oom=True), "reported_inner_oom"),
+    ],
+)
+def test_supported_historical_failures_never_measure_zero(payload, reason):
+    raw = json.dumps(payload).encode()
+    historical = module._historical_report(
+        ContainerResult("completed", exit_code=0, stdout=raw)
+    )
+    assert historical["status"] == "unavailable"
+    assert historical["reason"] == reason
+    assert historical["reported_result"] is None
+    assert historical["reported_flags"] == {
+        k: v for k, v in payload.items() if k != "stdout"
+    }
+    assert all(
+        entry == {"present": False, "value": None}
+        for entry in historical["counter_observations"].values()
+    )
+    assert historical["runtime"]["stdout_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert historical["semantic_completion_authenticated"] is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        failure_report(),
+        failure_report(success=True),
+        failure_report(stdout={"raw": None}),
+        failure_report(stdout={"raw": "x", "verdict": True}),
+        failure_report(timeout=True, oom=True),
+        failure_report(oom=True, stdout={"raw": "oom"}),
+        failure_report(success=True, stdout={"tests_passed": 1}),
+        failure_report(success=True, stdout={"tests_evaluated": 1, "tests_passed": 2}),
+        failure_report(success=True, stdout={"tests_evaluated": 0, "tests_passed": 1}),
+        {"historical_unavailable": "unknown", "exception_type": "ValueError"},
+        {
+            "historical_unavailable": "unsupported_result_validation_or_supervisor_error",
+            "exception_type": "TypeError",
+            "extra": 1,
+        },
+    ],
+)
+def test_unrecognized_or_contradictory_output_has_no_historical_measurement(payload):
+    historical = module._historical_report(
+        ContainerResult("completed", stdout=json.dumps(payload).encode())
+    )
+    assert historical["status"] == "unresolved"
+    assert historical["reported_result"] is None
+
+
+def test_malformed_historical_report_stops_direct_replay_before_task(monkeypatch):
+    calls = []
+
+    def transport(*args, **kwargs):
+        calls.append(True)
+        return raw_result({"success": True})
+
+    monkeypatch.setattr(module, "run_container", transport)
+    monkeypatch.setattr(module, "historical_script", lambda *a: ("authored", b""))
+    result = module._replay_response(
+        "```python\ndef run_tests(): pass\n```",
+        {
+            "setup_code": "",
+            "func_name": "Solution().f",
+            "gt_answer": ["assert Solution().f() == 1"],
+        },
+        {},
+        SandboxConfig(),
+    )
+    assert len(calls) == 1
+    assert result["task"]["status"] == "unavailable"
+    assert result["task"]["reason"] == "historical_protocol_unavailable"
+
+
+def test_deeply_nested_counter_diagnostic_serializes_in_record():
+    base = b'{"success":true,"compiled":true,"timeout":false,"oom":false,"stdout":{"tests_passed":1,"tests_evaluated":'
+    raw = base + b"[" * 500 + b"0" + b"]" * 500 + b"}}"
+    history = module._historical_report(ContainerResult("completed", stdout=raw))
+    encoded = serialize_replay({"replay_schema_version": 1, "historical": history})
+    restored = json.loads(encoded)["historical"]
+    assert restored["reason"] == "invalid_historical_counters"
+    assert restored["counter_observations"]["tests_evaluated"]["value"] == {
+        "invalid_value": "nesting_limit",
+        "value_type": "list",
+    }
+    assert restored["runtime"]["stdout_sha256"] == hashlib.sha256(raw).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "reason,payload",
+    [
+        (
+            "reported_child_output_or_setup_failure",
+            failure_report(compiled=False, stdout={"raw": "arbitrary worker text"}),
+        ),
+        (
+            "unsupported_historical_result",
+            {
+                "historical_unavailable": "unsupported_result_validation_or_supervisor_error",
+                "exception_type": "TypeError",
+            },
+        ),
+    ],
+)
+def test_unsupported_producer_reports_stop(reason, payload):
+    observation = module._historical_report(raw_result(payload))
+    assert observation["reason"] == reason and observation["reported_result"] is None
+    assert not module._historical_allows_protected(observation)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"compiled": False},
+        {"timeout": True},
+        {"oom": True},
+        {"tests_evaluated": 0},
+        {"tests_passed": 1, "exception_types": ["AssertionError"]},
+        {"tests_passed": False},
+    ],
+)
+def test_impossible_normalized_claim_may_not_permit_continuation(change):
+    payload = failure_report(
+        success=True,
+        stdout={
+            "tests_total": 1,
+            "tests_evaluated": 1,
+            "tests_passed": 1,
+            "test_errors": [],
+        },
+    )
+    observation = module._historical_report(raw_result(payload))
+    assert module._historical_allows_protected(observation)
+    observation["reported_result"].update(change)
+    assert not module._historical_allows_protected(observation)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "historical_configuration",
+        "historical_architecture",
+        "protected_cleanup",
+        "protected_architecture",
+        "reused_container",
+    ],
+)
+def test_unsafe_mode_cannot_authorize_protected_verdict(monkeypatch, failure):
+    history = raw_result(failure_report(stdout={"raw": "fixture"}))
+    task = raw_result(answer(["int", 1]), 1)
+    if failure == "historical_configuration":
+        history = replace(history, config_verified=False)
+    elif failure == "historical_architecture":
+        history = replace(
+            history, metadata={**history.metadata, "architecture": "unverified"}
+        )
+    elif failure == "protected_cleanup":
+        task = replace(task, cleanup_verified=False)
+    elif failure == "protected_architecture":
+        task = replace(task, metadata={**task.metadata, "architecture": "amd64"})
+    else:
+        task = replace(
+            task,
+            metadata={
+                **task.metadata,
+                "container_id": history.metadata["container_id"],
+            },
+        )
+    calls = []
+
+    def transport(*args, **kwargs):
+        calls.append(True)
+        return history if len(calls) == 1 else task
+
+    monkeypatch.setattr(module, "run_container", transport)
+    monkeypatch.setattr(module, "historical_script", lambda *a: ("authored", b""))
+    result = module._replay_response(
+        "```python\ndef run_tests(): pass\n```",
+        {
+            "setup_code": "",
+            "func_name": "Solution().f",
+            "gt_answer": ["assert Solution().f() == 1"],
+        },
+        {},
+        SandboxConfig(),
+    )
+    assert len(calls) == (1 if failure.startswith("historical") else 2)
+    assert not result["task"]["determinate"]
+    assert result["evidence_status"] == "unresolved"
+
+
+@pytest.mark.parametrize("raw_text", ["", "private trace text \U0001f601", "\ud800"])
+def test_raw_error_fingerprint_binds_text_without_exporting_it(raw_text):
+    observation = module._historical_report(
+        raw_result(failure_report(stdout={"raw": raw_text}))
+    )
+    encoded = json.dumps(raw_text, ensure_ascii=True).encode("ascii")
+    assert observation["reported_raw"] == {
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "bytes": len(encoded),
+    }
+    assert module._historical_allows_protected(observation)
+    restored = json.loads(
+        serialize_replay({"replay_schema_version": 1, "historical": observation})
+    )
+    assert restored["historical"] == observation and "private trace text" not in str(
+        restored
+    )
+
+
+@pytest.mark.parametrize("success", [True, False])
+@pytest.mark.parametrize("passed", [0, 1])
+def test_single_call_measurement_accepts_coherent_parent_exit_override(success, passed):
+    payload = failure_report(
+        success=success,
+        stdout={
+            "tests_total": 1,
+            "tests_evaluated": 1,
+            "tests_passed": passed,
+            "test_errors": [] if passed else ["AssertionError: fixture"],
+        },
+    )
+    observed = module._historical_report(raw_result(payload))
+    assert (
+        module._historical_allows_protected(observed)
+        and observed["reported_result"]["tests_passed"] == passed
+    )
+
+
+@pytest.mark.parametrize(
+    "counter", [[list(range(4096))], "x" * 20000], ids=["wide_array", "long_string"]
+)
+def test_wide_counter_diagnostic_preserves_hash_and_bounds_publication(counter):
+    payload = failure_report(
+        success=True, stdout={"tests_passed": 0, "tests_evaluated": counter}
+    )
+    wire = json.dumps(payload).encode()
+    history = module._historical_report(ContainerResult("completed", stdout=wire))
+    text = serialize_replay({"replay_schema_version": 1, "historical": history})
+    assert len(text) < 4096
+    diag = json.loads(text)["historical"]["counter_observations"]["tests_evaluated"][
+        "value"
+    ]
+    assert diag == {"invalid_value": "size_limit", "value_type": type(counter).__name__}
+    assert history["runtime"]["stdout_sha256"] == hashlib.sha256(wire).hexdigest()

@@ -1,9 +1,10 @@
 import json
+from dataclasses import replace
 
 import pytest
+from test_investigation import raw_result
 
 from rolloutdiff import replay as module
-from rolloutdiff._replay_container import ContainerResult
 from rolloutdiff.cli import main
 
 
@@ -111,12 +112,17 @@ def test_cli_duplicate_json_remains_unresolved_through_replay(
     monkeypatch.setattr(module, "verify_artifacts", lambda *a: {"fixture": fixture})
     monkeypatch.setattr(module, "load_task", lambda *a: task)
     monkeypatch.setattr(module, "historical_script", lambda *a: ("unused", b""))
-    historical = b'{"success":true,"compiled":true,"timeout":false,"oom":false,"stdout":{"tests_evaluated":1,"tests_passed":1}}'
-    outputs = iter([historical, raw])
+    historical = b'{"success":true,"compiled":true,"timeout":false,"oom":false,"stdout":{"tests_evaluated":1,"tests_passed":1,"tests_total":1,"test_errors":[]}}'
+    outputs = iter(
+        [
+            replace(raw_result(None), stdout=historical),
+            replace(raw_result(None, 1), stdout=raw),
+        ]
+    )
 
     def run(*args, execution_authorized):
         assert execution_authorized is True
-        return ContainerResult("completed", stdout=next(outputs), cleanup_verified=True)
+        return next(outputs)
 
     monkeypatch.setattr(module, "run_container", run)
     assert main([*arguments(tmp_path), "--allow-execution"]) == exit_code

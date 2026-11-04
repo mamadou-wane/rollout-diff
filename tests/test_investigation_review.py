@@ -283,7 +283,7 @@ def test_r2_counter_observations_preserve_invalid_or_missing_values(
 
 
 @pytest.mark.parametrize("evaluated,passed", [(0, 0), (1, 0), (1, 1), (0, 1)])
-def test_r2_valid_counters_round_trip_without_reinterpretation(
+def test_one_call_measurements_round_trip_and_impossible_counters_stop(
     fixture, monkeypatch, evaluated, passed
 ):
     prepared = prepare(fixture)
@@ -306,6 +306,11 @@ def test_r2_valid_counters_round_trip_without_reinterpretation(
     restored = mod.compare_aria_intervention(
         fixture["directory"], fixture["directory"] / "result.json"
     )
+    if evaluated == 0:
+        assert report["status"] == restored["status"] == "stopped"
+        assert restored["variant"]["historical"]["reported_result"] is None
+        assert not (fixture["directory"] / "mode-2-started.json").exists()
+        return
     assert report["status"] == restored["status"] == "complete"
     claim = restored["variant"]["historical"]["reported_result"]
     assert claim["tests_passed"] == passed and claim["tests_evaluated"] == evaluated
@@ -461,7 +466,7 @@ def test_nonfinite_counter_diagnostics_are_saved_and_reimported(
     ],
 )
 def test_invalid_diagnostic_representation_is_bounded_and_strict(value, kind):
-    observed = mod._counter_diagnostic(value)
+    observed = mod.replay._counter_diagnostic(value)
     assert observed["invalid_value"] == "non_finite_number"
     assert observed["value_type"] == kind
     if kind == "float":
@@ -474,8 +479,8 @@ def test_invalid_diagnostic_representation_is_bounded_and_strict(value, kind):
 )
 def test_finite_invalid_counter_values_remain_unchanged(value):
     before = copy.deepcopy(value)
-    assert mod._counter_diagnostic(value) == value == before
-    json.dumps(mod._counter_diagnostic(value), allow_nan=False)
+    assert mod.replay._counter_diagnostic(value) == value == before
+    json.dumps(mod.replay._counter_diagnostic(value), allow_nan=False)
 
 
 def test_diagnostic_recursion_failure_keeps_serializer_strict(monkeypatch):
@@ -484,7 +489,7 @@ def test_diagnostic_recursion_failure_keeps_serializer_strict(monkeypatch):
 
     with monkeypatch.context() as scoped:
         scoped.setattr(mod.json, "dumps", recursion_failure)
-        observed = mod._counter_diagnostic([])
+        observed = mod.replay._counter_diagnostic([])
     assert observed == {"invalid_value": "nesting_limit", "value_type": "list"}
     json.dumps(observed, allow_nan=False)
     with pytest.raises(ValueError):
@@ -617,7 +622,7 @@ def test_compile_failure_keeps_safety_gates_before_protected_mode(
     assert report["variant"]["task"]["reason"] == "not_attempted"
 
 
-def test_explicit_compile_failure_counters_keep_their_original_claim():
+def test_compile_failure_with_invented_counters_stops():
     payload = {
         "success": False,
         "compiled": False,
@@ -626,6 +631,136 @@ def test_explicit_compile_failure_counters_keep_their_original_claim():
         "stdout": {"tests_evaluated": 0, "tests_passed": 0},
     }
     observed = mod._historical_observation(raw_result(payload))
-    assert observed["status"] == "reported"
-    assert observed["reported_result"]["tests_evaluated"] == 0
-    assert observed["reported_result"]["tests_passed"] == 0
+    assert observed["status"] == "unresolved"
+    assert observed["reported_result"] is None
+
+
+@pytest.mark.parametrize(
+    "flags,stdout,reason",
+    [
+        ((False, False, False, False), {}, "reported_compile_failure"),
+        (
+            (False, True, False, False),
+            {"raw": "fixture error"},
+            "reported_runtime_error",
+        ),
+        ((False, True, True, False), {}, "reported_inner_timeout"),
+        ((False, True, False, True), {}, "reported_inner_oom"),
+    ],
+)
+def test_unavailable_history_retains_independent_task_and_private_stream(
+    fixture, monkeypatch, flags, stdout, reason
+):
+    prepared = prepare(fixture)
+    approve(fixture, prepared)
+    payload = dict(
+        zip(("success", "compiled", "timeout", "oom"), flags, strict=True),
+        stdout=stdout,
+    )
+    first = raw_result(payload)
+    outputs = iter(
+        [
+            first,
+            raw_result({"results": [{"value": ["int", 1]}, {"value": ["int", 3]}]}, 1),
+        ]
+    )
+    monkeypatch.setattr(mod.boundary, "run_container", lambda *a, **kw: next(outputs))
+    result = mod.execute_aria_intervention(
+        fixture["directory"],
+        fixture["source"],
+        artifacts=fixture["artifacts"],
+        execution_authorized=True,
+    )
+    saved = mod.compare_aria_intervention(
+        fixture["directory"], fixture["directory"] / "result.json"
+    )
+    assert saved["variant"] == result["variant"]
+    assert result["status"] == "complete"
+    h = result["variant"]["historical"]
+    assert (h["status"], h["reason"], h["reported_result"]) == (
+        "unavailable",
+        reason,
+        None,
+    )
+    assert result["variant"]["task"]["status"] == "failed"
+    assert all(
+        p["status"] == "unavailable" and p["observed"] is None
+        for p in result["predictions"]
+        if p["field"].startswith("historical_")
+    )
+    stream = fixture["directory"] / "mode-1.stdout.hex"
+    assert bytes.fromhex(stream.read_text()) == first.stdout
+    stream.write_text("00")
+    with pytest.raises(ValueError, match="stream"):
+        mod.compare_aria_intervention(
+            fixture["directory"], fixture["directory"] / "result.json"
+        )
+
+
+@pytest.mark.parametrize(
+    "name", ["consumed.json", "approval.json", "mode-1-started.json"]
+)
+def test_lost_attempt_accounting_blocks_second_mode(fixture, monkeypatch, name):
+    prepared = prepare(fixture)
+    approve(fixture, prepared)
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(True)
+        (fixture["directory"] / name).write_text("{}")
+        return raw_result(
+            {
+                "success": False,
+                "compiled": True,
+                "timeout": False,
+                "oom": False,
+                "stdout": {"raw": "fixture"},
+            }
+        )
+
+    monkeypatch.setattr(mod.boundary, "run_container", run)
+    result = mod.execute_aria_intervention(
+        fixture["directory"],
+        fixture["source"],
+        artifacts=fixture["artifacts"],
+        execution_authorized=True,
+    )
+    assert calls == [True] and result["status"] == "stopped"
+    assert not (fixture["directory"] / "mode-2-started.json").exists()
+    assert (fixture["directory"] / "consumed.json").exists()
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        b"[" * 992 + b"0" + b"]" * 992,
+        b"[" * 60 + b",".join([b"0"] * 130000) + b"]" * 60,
+    ],
+    ids=["deep", "wide"],
+)
+def test_large_invalid_counter_stops_saves_and_reimports(fixture, monkeypatch, token):
+    from dataclasses import replace
+
+    prepared = prepare(fixture)
+    approve(fixture, prepared)
+    payload = historical()
+    payload["stdout"]["tests_evaluated"] = "NESTED"
+    raw = json.dumps(payload).encode().replace(b'"NESTED"', token)
+    monkeypatch.setattr(
+        mod.boundary,
+        "run_container",
+        lambda *a, **kw: replace(raw_result({}), stdout=raw),
+    )
+    result = mod.execute_aria_intervention(
+        fixture["directory"],
+        fixture["source"],
+        artifacts=fixture["artifacts"],
+        execution_authorized=True,
+    )
+    assert result["status"] == "stopped"
+    assert not (fixture["directory"] / "mode-2-started.json").exists()
+    saved = mod.compare_aria_intervention(
+        fixture["directory"], fixture["directory"] / "result.json"
+    )
+    assert saved["variant"] == result["variant"]
+    assert saved["variant"]["historical"]["runtime"]["stdout_sha256"] == digest(raw)

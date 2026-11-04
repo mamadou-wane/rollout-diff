@@ -222,6 +222,11 @@ def _validate_outcomes(record, checks, *, partial=False, architecture=None):
         )
     else:
         _validate_historical(historical)
+        if not partial:
+            _require(
+                replay._historical_allows_protected(historical),
+                "completed assessment requires admissible historical evidence",
+            )
     if partial and "runtime" not in task:
         _require(
             task
@@ -255,8 +260,16 @@ def _validate_historical(historical):
         and historical.get("semantic_completion_authenticated") is False,
         "historical claims must remain untrusted",
     )
-    if historical.get("reason") == "reported_compile_failure":
+    reason = historical.get("reason")
+    if reason in replay._HISTORICAL_UNAVAILABLE_FLAGS:
         flags = historical.get("reported_flags")
+        expected = dict(
+            zip(
+                replay._FLAG_NAMES,
+                replay._HISTORICAL_UNAVAILABLE_FLAGS[reason],
+                strict=True,
+            )
+        )
         counters = historical.get("counter_observations")
         _require(
             historical["status"] == "unavailable"
@@ -264,10 +277,10 @@ def _validate_historical(historical):
             and historical.get("reported_result") is None
             and "rejected_report" not in historical
             and type(flags) is dict
-            and set(flags) == {"success", "compiled", "timeout", "oom"}
-            and all(value is False for value in flags.values())
+            and set(flags) == set(expected)
+            and all(flags[name] is value for name, value in expected.items())
             and type(counters) is dict
-            and set(counters) == {"tests_evaluated", "tests_passed"}
+            and set(counters) == set(replay._COUNTER_NAMES)
             and all(
                 type(item) is dict
                 and set(item) == {"present", "value"}
@@ -275,8 +288,22 @@ def _validate_historical(historical):
                 and item["value"] is None
                 for item in counters.values()
             ),
-            "invalid reported compile failure",
+            "invalid unavailable historical evidence",
         )
+        if reason == "reported_runtime_error":
+            raw = historical.get("reported_raw")
+            _require(
+                type(raw) is dict
+                and set(raw) == {"bytes", "sha256"}
+                and _integer(raw["bytes"])
+                and raw["bytes"] >= 2
+                and _hash(raw["sha256"]),
+                "invalid historical error text fingerprint",
+            )
+        else:
+            _require(
+                "reported_raw" not in historical, "unexpected historical error text"
+            )
     if historical["status"] == "reported":
         _require(
             historical["runtime"]["status"] == "completed",
@@ -330,44 +357,24 @@ def _validate_historical(historical):
             )
 
 
-def _counter_diagnostic(value):
-    try:
-        json.dumps(value, allow_nan=False)
-    except ValueError:
-        diagnostic = {
-            "invalid_value": "non_finite_number",
-            "value_type": type(value).__name__,
-        }
-        if type(value) is float:
-            diagnostic["representation"] = repr(value)
-        return diagnostic
-    except RecursionError:
-        return {"invalid_value": "nesting_limit", "value_type": type(value).__name__}
-    return value
+_historical_observation = replay._historical_report
 
 
-def _historical_observation(raw):
-    observation = replay._historical_report(raw)
-    if observation["status"] == "reported":
-        counters = replay._json_output(raw.stdout)["stdout"]
-        fields = ("tests_evaluated", "tests_passed")
-        if not all(
-            _integer(counters.get(name)) and counters[name] <= 1 for name in fields
-        ):
-            observation.update(
-                status="unresolved",
-                reason="invalid_historical_counters",
-                rejected_report=observation["reported_result"],
-                reported_result=None,
-                counter_observations={
-                    name: {
-                        "present": name in counters,
-                        "value": _counter_diagnostic(counters.get(name)),
-                    }
-                    for name in fields
-                },
-            )
-    return observation
+def _validate_historical_stream(observation, content):
+    runtime = observation["runtime"]
+    _require(
+        _sha(content) == runtime["stdout_sha256"]
+        and len(content) == runtime["stdout_bytes"],
+        "historical stream differs from runtime evidence",
+    )
+    parsed = replay._historical_report(
+        boundary.ContainerResult(runtime["status"], stdout=content)
+    )
+    parsed["runtime"] = runtime
+    _require(
+        _json(parsed) == _json(observation),
+        "historical stream differs from observation",
+    )
 
 
 def _validate_task(task, checks):
@@ -845,6 +852,14 @@ def compare_aria_intervention(directory, result, *, provenance=None):
             partial=status == "stopped",
             architecture=control["historical"]["runtime"]["metadata"]["architecture"],
         )
+        if provenance is None and "runtime" in variant["historical"]:
+            stream_path = directory / "mode-1.stdout.hex"
+            if status == "complete" or stream_path.exists() or stream_path.is_symlink():
+                _require(stream_path.is_file(), "historical stream unavailable")
+                _validate_historical_stream(
+                    variant["historical"],
+                    bytes.fromhex(_read(stream_path).decode("ascii")),
+                )
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError("incomplete or incompatible derived evidence") from exc
     return _comparison(
@@ -905,20 +920,18 @@ def execute_aria_intervention(
         "comparison.json",
         "comparison.html",
         "mode-1.json",
+        "mode-1.stdout.hex",
         "mode-2.json",
     ):
         _require(not (directory / name).exists(), "execution output already exists")
-    _save(
-        directory,
-        "consumed.json",
-        {
-            "approval_sha256": _sha(_read(directory / "approval.json")),
-            "case_sha256": case_sha,
-            "reserved_containers": 2,
-            "consumed_at": datetime.now(UTC).isoformat(),
-            "status": "spent",
-        },
-    )
+    claim = {
+        "approval_sha256": _sha(_read(directory / "approval.json")),
+        "case_sha256": case_sha,
+        "reserved_containers": 2,
+        "consumed_at": datetime.now(UTC).isoformat(),
+        "status": "spent",
+    }
+    _save(directory, "consumed.json", claim)
     result = {
         "investigation_result_version": 1,
         "case_id": manifest["case_id"],
@@ -940,6 +953,26 @@ def execute_aria_intervention(
     try:
         for index, (script, payload) in enumerate(workers):
             _require(index < approval["max_containers"], "container budget exhausted")
+            _require(
+                _read(directory / "consumed.json") == _json(claim).encode()
+                and _sha(_read(directory / "approval.json"))
+                == claim["approval_sha256"],
+                "execution authorization accounting changed",
+            )
+            if index == 1:
+                _require(
+                    _read(directory / "mode-1-started.json")
+                    == _json(manifest["worker_inputs"][0]).encode()
+                    and _read(directory / "mode-1.json")
+                    == _json(result["historical"]).encode(),
+                    "historical mode accounting changed",
+                )
+                _validate_historical_stream(
+                    result["historical"],
+                    bytes.fromhex(
+                        _read(directory / "mode-1.stdout.hex").decode("ascii")
+                    ),
+                )
             _save(
                 directory,
                 f"mode-{index + 1}-started.json",
@@ -978,6 +1011,8 @@ def execute_aria_intervention(
                     "all original checks; fresh Solution per call; host equality"
                 )
             result["historical" if index == 0 else "task"] = observation
+            if index == 0:
+                _write_text(raw.stdout.hex(), directory / "mode-1.stdout.hex")
             _save(directory, f"mode-{index + 1}.json", observation)
             if interruption is not None:
                 raise interruption
@@ -986,11 +1021,10 @@ def execute_aria_intervention(
                 (observation,),
                 control["historical"]["runtime"]["metadata"]["architecture"],
             )
-            if index == 0 and raw.status == "completed":
+            if index == 0:
                 _validate_historical(observation)
                 _require(
-                    observation["status"] == "reported"
-                    or observation.get("reason") == "reported_compile_failure",
+                    replay._historical_allows_protected(observation),
                     observation.get("reason", "historical protocol unresolved"),
                 )
         _validate_outcomes(result, len(cases))
