@@ -255,6 +255,28 @@ def _validate_historical(historical):
         and historical.get("semantic_completion_authenticated") is False,
         "historical claims must remain untrusted",
     )
+    if historical.get("reason") == "reported_compile_failure":
+        flags = historical.get("reported_flags")
+        counters = historical.get("counter_observations")
+        _require(
+            historical["status"] == "unavailable"
+            and historical["runtime"]["status"] == "completed"
+            and historical.get("reported_result") is None
+            and "rejected_report" not in historical
+            and type(flags) is dict
+            and set(flags) == {"success", "compiled", "timeout", "oom"}
+            and all(value is False for value in flags.values())
+            and type(counters) is dict
+            and set(counters) == {"tests_evaluated", "tests_passed"}
+            and all(
+                type(item) is dict
+                and set(item) == {"present", "value"}
+                and item["present"] is False
+                and item["value"] is None
+                for item in counters.values()
+            ),
+            "invalid reported compile failure",
+        )
     if historical["status"] == "reported":
         _require(
             historical["runtime"]["status"] == "completed",
@@ -965,17 +987,11 @@ def execute_aria_intervention(
                 control["historical"]["runtime"]["metadata"]["architecture"],
             )
             if index == 0 and raw.status == "completed":
+                _validate_historical(observation)
                 _require(
-                    observation["status"] == "reported",
+                    observation["status"] == "reported"
+                    or observation.get("reason") == "reported_compile_failure",
                     observation.get("reason", "historical protocol unresolved"),
-                )
-                reported = observation["reported_result"]
-                _require(
-                    all(
-                        type(reported.get(k)) is int and reported[k] in (0, 1)
-                        for k in ("tests_evaluated", "tests_passed")
-                    ),
-                    "historical counters unresolved",
                 )
         _validate_outcomes(result, len(cases))
         result["status"] = "complete"

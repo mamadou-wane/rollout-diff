@@ -216,6 +216,17 @@ def _historical_report(result):
         record["reason"] = "invalid_historical_result_envelope"
         return record
     counts = payload["stdout"]
+    if not counts and all(payload[name] is False for name in boolean_fields):
+        record.update(
+            status="unavailable",
+            reason="reported_compile_failure",
+            reported_flags={name: payload[name] for name in boolean_fields},
+            counter_observations={
+                name: {"present": False, "value": None}
+                for name in ("tests_evaluated", "tests_passed")
+            },
+        )
+        return record
     record["reported_result"] = {
         name: payload.get(name) if type(payload.get(name)) is bool else None
         for name in boolean_fields

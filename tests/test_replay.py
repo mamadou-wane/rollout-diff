@@ -380,3 +380,121 @@ def test_unverified_cleanup_prevents_next_evaluation_mode(monkeypatch, cancelled
         assert result["task"]["reason"] == "historical_container_infrastructure_failure"
         assert result["evidence_status"] == "unresolved"
     assert len(calls) == 1
+
+
+COUNTER_FREE_COMPILE_FAILURE = (
+    b'{"success": false, "compiled": false, "timeout": false, '
+    b'"oom": false, "stdout": {}}'
+)
+
+
+def test_counter_free_compile_failure_preserves_unavailable_measurements():
+    raw = ContainerResult("completed", exit_code=0, stdout=COUNTER_FREE_COMPILE_FAILURE)
+    result = module._historical_report(raw)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "reported_compile_failure"
+    assert result["reported_result"] is None
+    assert result["reported_flags"] == {
+        "success": False,
+        "compiled": False,
+        "timeout": False,
+        "oom": False,
+    }
+    assert result["counter_observations"] == {
+        "tests_evaluated": {"present": False, "value": None},
+        "tests_passed": {"present": False, "value": None},
+    }
+    assert result["semantic_completion_authenticated"] is False
+    assert result["authority"] == "candidate_controlled_historical_report"
+    assert result["runtime"]["stdout_sha256"] == (
+        "0f7df0ace964cf4d0df33bfb977284ecd169d3cad08e0ce040620a3b2ba206e7"
+    )
+    restored = json.loads(
+        serialize_replay({"replay_schema_version": 1, "historical": result})
+    )
+    assert restored["historical"] == result
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"success": True},
+        {"compiled": True},
+        {"timeout": True},
+        {"oom": True},
+        {"success": 0},
+        {"compiled": 0},
+        {"timeout": 0},
+        {"oom": 0},
+        {"stdout": []},
+        {"stdout": {"tests_passed": 0}},
+        {"extra": False},
+    ],
+)
+def test_compile_failure_recognition_does_not_accept_nearby_envelopes(changes):
+    payload = json.loads(COUNTER_FREE_COMPILE_FAILURE) | changes
+    result = module._historical_report(
+        ContainerResult("completed", exit_code=0, stdout=json.dumps(payload).encode())
+    )
+    assert result.get("reason") != "reported_compile_failure"
+
+
+@pytest.mark.parametrize("status", ["timeout", "nonzero_exit", "infrastructure_error"])
+def test_compile_failure_claim_cannot_override_runtime(status):
+    result = module._historical_report(
+        ContainerResult(status, stdout=COUNTER_FREE_COMPILE_FAILURE)
+    )
+    assert result["status"] == "unresolved" and result["reported_result"] is None
+
+
+@pytest.mark.parametrize(
+    "response,expected",
+    [
+        (answer(["int", 1]), "passed"),
+        (answer(["int", 2]), "failed"),
+        ({"results": [{"exception": "ValueError"}]}, "unresolved"),
+    ],
+)
+def test_compile_failure_claim_keeps_protected_assessment_independent(
+    monkeypatch, response, expected
+):
+    task = {
+        "setup_code": "",
+        "func_name": "Solution().answer",
+        "gt_answer": ["assert Solution().answer(x=0) == 1"],
+    }
+    outputs = iter([COUNTER_FREE_COMPILE_FAILURE, json.dumps(response).encode()])
+    calls = []
+    monkeypatch.setattr(
+        module, "historical_script", lambda *a: ("authored runner", b"fixture")
+    )
+
+    def transport(script, payload, config, *, execution_authorized):
+        calls.append(script)
+        return ContainerResult(
+            "completed",
+            exit_code=0,
+            stdout=next(outputs),
+            config_verified=True,
+            cleanup_verified=True,
+        )
+
+    monkeypatch.setattr(module, "run_container", transport)
+    record = module._replay_response(
+        "```python\ninvalid syntax(\n```", task, {}, SandboxConfig()
+    )
+    assert len(calls) == 2
+    assert record["historical"]["reported_result"] is None
+    assert record["historical"]["status"] == "unavailable"
+    assert record["task"]["status"] == expected
+    assert record["evidence_status"] != "reproduced_discrepancy"
+    assert record["mechanism_status"] == "unresolved"
+
+
+def test_duplicate_compile_failure_flags_remain_invalid_protocol():
+    raw = COUNTER_FREE_COMPILE_FAILURE.replace(
+        b'"compiled": false', b'"compiled": true, "compiled": false'
+    )
+    result = module._historical_report(ContainerResult("completed", stdout=raw))
+    assert result["status"] == "unresolved" and result["reported_result"] is None
+    assert result.get("reason") != "reported_compile_failure"

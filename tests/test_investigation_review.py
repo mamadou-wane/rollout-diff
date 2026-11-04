@@ -489,3 +489,143 @@ def test_diagnostic_recursion_failure_keeps_serializer_strict(monkeypatch):
     json.dumps(observed, allow_nan=False)
     with pytest.raises(ValueError):
         mod._json({"invalid": float("inf")})
+
+
+@pytest.mark.parametrize("answer_value,task_status", [(2, "passed"), (3, "failed")])
+def test_counter_free_compile_failure_continues_and_round_trips(
+    fixture, monkeypatch, answer_value, task_status
+):
+    from dataclasses import replace
+
+    from test_replay import COUNTER_FREE_COMPILE_FAILURE
+
+    prepared = prepare(fixture)
+    approve(fixture, prepared)
+    outputs = iter(
+        [
+            replace(raw_result({}), stdout=COUNTER_FREE_COMPILE_FAILURE),
+            raw_result(
+                {"results": [{"value": ["int", 1]}, {"value": ["int", answer_value]}]},
+                1,
+            ),
+        ]
+    )
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(True)
+        return next(outputs)
+
+    monkeypatch.setattr(mod.boundary, "run_container", run)
+    report = mod.execute_aria_intervention(
+        fixture["directory"],
+        fixture["source"],
+        artifacts=fixture["artifacts"],
+        execution_authorized=True,
+    )
+    assert len(calls) == 2 and report["status"] == "complete"
+    restored = mod.compare_aria_intervention(
+        fixture["directory"], fixture["directory"] / "result.json"
+    )
+    assert restored["variant"] == report["variant"]
+    history = restored["variant"]["historical"]
+    assert history["status"] == "unavailable" and history["reported_result"] is None
+    assert history["reason"] == "reported_compile_failure"
+    assert restored["variant"]["task"]["status"] == task_status
+    for prediction in restored["predictions"]:
+        if prediction["field"] in {
+            "historical_passed",
+            "historical_evaluated",
+            "exception_types",
+        }:
+            assert (
+                prediction["observed"] is None and prediction["status"] == "unavailable"
+            )
+    assert (fixture["directory"] / "consumed.json").exists()
+    with pytest.raises(ValueError, match="spent"):
+        mod.execute_aria_intervention(
+            fixture["directory"],
+            fixture["source"],
+            artifacts=fixture["artifacts"],
+            execution_authorized=True,
+        )
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "reported"),
+        (
+            "reported_flags",
+            {"success": False, "compiled": 0, "timeout": False, "oom": False},
+        ),
+        (
+            "counter_observations",
+            {
+                "tests_evaluated": {"present": False, "value": 0},
+                "tests_passed": {"present": False, "value": None},
+            },
+        ),
+    ],
+)
+def test_compile_failure_import_rejects_invented_measurements(field, value):
+    from dataclasses import replace
+
+    from test_replay import COUNTER_FREE_COMPILE_FAILURE
+
+    observation = mod._historical_observation(
+        replace(raw_result({}), stdout=COUNTER_FREE_COMPILE_FAILURE)
+    )
+    assert observation["reason"] == "reported_compile_failure"
+    observation[field] = value
+    with pytest.raises(ValueError):
+        mod._validate_historical(observation)
+
+
+@pytest.mark.parametrize("failure", ["cleanup", "configuration", "architecture"])
+def test_compile_failure_keeps_safety_gates_before_protected_mode(
+    fixture, monkeypatch, failure
+):
+    from dataclasses import replace
+
+    from test_replay import COUNTER_FREE_COMPILE_FAILURE
+
+    prepared = prepare(fixture)
+    approve(fixture, prepared)
+    raw = replace(raw_result({}), stdout=COUNTER_FREE_COMPILE_FAILURE)
+    if failure == "cleanup":
+        raw = replace(raw, cleanup_verified=False)
+    elif failure == "configuration":
+        raw = replace(raw, config_verified=False)
+    else:
+        raw = replace(raw, metadata={**raw.metadata, "architecture": "amd64"})
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(True)
+        return raw
+
+    monkeypatch.setattr(mod.boundary, "run_container", run)
+    report = mod.execute_aria_intervention(
+        fixture["directory"],
+        fixture["source"],
+        artifacts=fixture["artifacts"],
+        execution_authorized=True,
+    )
+    assert len(calls) == 1 and report["status"] == "stopped"
+    assert report["variant"]["task"]["reason"] == "not_attempted"
+
+
+def test_explicit_compile_failure_counters_keep_their_original_claim():
+    payload = {
+        "success": False,
+        "compiled": False,
+        "timeout": False,
+        "oom": False,
+        "stdout": {"tests_evaluated": 0, "tests_passed": 0},
+    }
+    observed = mod._historical_observation(raw_result(payload))
+    assert observed["status"] == "reported"
+    assert observed["reported_result"]["tests_evaluated"] == 0
+    assert observed["reported_result"]["tests_passed"] == 0
