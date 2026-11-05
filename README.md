@@ -27,6 +27,14 @@ uv pip install --python .venv/bin/python -e '.[test]'
 
 ## Usage
 
+### Local investigation
+
+```sh
+.venv/bin/rollout investigate --root /path/to/rollout-data
+```
+
+Choose a TRL or verl dump in the browser to analyze it, inspect ranked events and responses, or compare windows. The local app supports macOS and Linux, reads only within the selected root and binds to loopback. Keep its session URL private. Saved replay and intervention evidence can be viewed without executing responses. Installed wheels include the frontend; Node is needed only to rebuild it. Use `--no-browser` to print the URL without opening it.
+
 ### Analyze and render
 
 Analyze TRL completions and render the saved report as searchable HTML:
@@ -126,5 +134,17 @@ Detector error rates are uncalibrated. Vocabulary selection uses the full run fo
 .venv/bin/ruff check src bench tests
 .venv/bin/python -m pytest -q -m 'not local_data'
 ```
+
+Frontend checks use Node 22.23.1:
+
+```sh
+npm ci --prefix frontend
+npm run --prefix frontend lint
+npm run --prefix frontend typecheck
+npm test --prefix frontend
+npm run --prefix frontend build
+```
+
+The build updates the packaged assets in `src/rolloutdiff/_web`. Commit them with frontend changes. `npm run --prefix frontend test:e2e` exercises the installed application with Chromium and synthetic data. Install that test browser with `cd frontend && npx playwright install chromium`.
 
 See [`bench/`](bench/) for public-run and synthetic benchmarks, and [`tests/`](tests/) for local-data checks. Keep datasets and generated outputs outside the repository. Aria and TRL redistribution permissions remain unresolved.

@@ -21,3 +21,16 @@ typing-inspection==0.4.4
 typing_extensions==4.16.0
 tzdata==2026.5
 wheel==0.48.0
+# Local investigation server and HTTP tests.
+annotated-doc==0.0.5
+anyio==4.16.0
+certifi==2026.10.23
+click==8.5.0
+fastapi==0.162.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+opentelemetry-api==1.45.2
+starlette==1.10.0
+uvicorn==0.54.0

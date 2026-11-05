@@ -24,6 +24,10 @@ dist/
 .coverage.*
 htmlcov/
 coverage.xml
+node_modules/
+/frontend/coverage/
+/frontend/test-results/
+/frontend/playwright-report/
 
 # Raw datasets and local benchmark inputs
 *.parquet

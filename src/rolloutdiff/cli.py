@@ -7,7 +7,10 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import socket
 import sys
+import webbrowser
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -79,6 +82,18 @@ def _step_range(value: str) -> tuple[int, int]:
     return start, end
 
 
+def _port(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "port must be an integer from 0 to 65535"
+        ) from None
+    if not 0 <= number <= 65535:
+        raise argparse.ArgumentTypeError("port must be an integer from 0 to 65535")
+    return number
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="rollout", allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -95,6 +110,34 @@ def _parser() -> argparse.ArgumentParser:
         "--reward-column", type=_nonempty, action=_Once, help="TRL reward column"
     )
     _diff_parser(commands)
+    investigate = commands.add_parser(
+        "investigate",
+        help="open the local investigation application",
+        allow_abbrev=False,
+        description=(
+            "Browse and analyze TRL/verl dumps inside an explicitly selected data root. "
+            "The application binds to loopback and uses a private session URL. "
+            "Saved replay and intervention evidence is read-only. Responses are never executed."
+        ),
+    )
+    investigate.add_argument(
+        "--root",
+        required=True,
+        type=_nonempty,
+        action=_Once,
+        help="directory the application may read",
+    )
+    investigate.add_argument(
+        "--port",
+        type=_port,
+        action=_Once,
+        help="loopback port (default: 8765; 0 chooses a free port)",
+    )
+    investigate.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="print the session URL without opening a browser",
+    )
     render = commands.add_parser(
         "render", help="render analysis or comparison JSON as HTML", allow_abbrev=False
     )
@@ -287,6 +330,45 @@ def _json_object(path):
     if type(value) is not dict:
         raise ValueError("input must be a valid JSON object without duplicate members")
     return value
+
+
+def _investigate(args):
+    import uvicorn
+
+    from .app import _require_local_platform, create_app
+
+    _require_local_platform()
+    root = Path(args.root).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("investigation root must be a directory")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 8765 if args.port is None else args.port))
+        listener.listen(128)
+        port = listener.getsockname()[1]
+        origin = f"http://127.0.0.1:{port}"
+        token = secrets.token_urlsafe(32)
+        app = create_app(root, token=token, origin=origin)
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=port,
+                proxy_headers=False,
+                access_log=False,
+                log_level="warning",
+            )
+        )
+        url = f"{origin}/#token={token}"
+        print("Local investigation. Keep the session URL private.", flush=True)
+        print(url, flush=True)
+        if not args.no_browser:
+            webbrowser.open(url)
+        try:
+            server.run(sockets=[listener])
+        except KeyboardInterrupt:
+            return 130
+    return 0
 
 
 def _investigation(args):
@@ -633,6 +715,8 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.error("--reward-column is supported only with --format trl")
     try:
+        if args.command == "investigate":
+            return _investigate(args)
         if args.command == "diff":
             return _diff(args)
         if args.command == "investigate-aria":
