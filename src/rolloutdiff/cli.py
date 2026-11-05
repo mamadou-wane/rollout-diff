@@ -1,14 +1,26 @@
-"""Analyze dumps, render reports, and inspect selected rollouts."""
+"""Analyze and compare dumps, render reports, and inspect selected rollouts."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import re
 import sys
+from contextlib import ExitStack
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from .adapters import load_trl, load_verl
-from .html_report import load_report, render_report
+from ._report_validation import validate_report
+from .adapters import _TRL_FILE, _VERL_FILE, _files, load_trl, load_verl
+from .comparison import compare_rollouts, resolve_comparison_citations
+from .comparison_report import (
+    comparison_json,
+    render_comparison_report,
+    validate_comparison_report,
+)
+from .html_report import render_report
 from .inspection import resolve_exemplars
 from .investigation import (
     approve_aria_intervention,
@@ -58,8 +70,17 @@ def _positive_integer(value: str) -> int:
     return result
 
 
+def _step_range(value: str) -> tuple[int, int]:
+    if not re.fullmatch(r"[0-9]+:[0-9]+", value):
+        raise argparse.ArgumentTypeError("use an inclusive START:END step range")
+    start, end = map(int, value.split(":"))
+    if start > end:
+        raise argparse.ArgumentTypeError("range start must not exceed its end")
+    return start, end
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = _Parser(prog="rolloutdiff", allow_abbrev=False)
+    parser = _Parser(prog="rollout", allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
     analyze = commands.add_parser(
         "analyze", help="analyze a TRL or verl rollout dump", allow_abbrev=False
@@ -73,10 +94,13 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument(
         "--reward-column", type=_nonempty, action=_Once, help="TRL reward column"
     )
+    _diff_parser(commands)
     render = commands.add_parser(
-        "render", help="render a JSON investigation report", allow_abbrev=False
+        "render", help="render analysis or comparison JSON as HTML", allow_abbrev=False
     )
-    render.add_argument("input", type=_nonempty, help="version-1 JSON report")
+    render.add_argument(
+        "input", type=_nonempty, help="analysis or comparison JSON report"
+    )
     render.add_argument("--output", required=True, type=_nonempty, action=_Once)
     inspect = commands.add_parser(
         "inspect", help="inspect selected exemplar responses", allow_abbrev=False
@@ -89,10 +113,21 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--report", required=True, type=_nonempty, action=_Once)
     inspect.add_argument(
         "--event-rank",
-        required=True,
         type=_positive_integer,
         action=_Once,
         help="within-run event rank from the saved report",
+    )
+    inspect.add_argument(
+        "--side",
+        choices=["a", "b"],
+        action=_Once,
+        help="comparison-report side to resolve",
+    )
+    inspect.add_argument(
+        "--feature",
+        type=_nonempty,
+        action=_Once,
+        help="comparison-report feature to inspect",
     )
     inspect.add_argument(
         "--reward-column", type=_nonempty, action=_Once, help="TRL reward column"
@@ -130,6 +165,73 @@ def _parser() -> argparse.ArgumentParser:
     )
     _investigation_parser(commands)
     return parser
+
+
+def _diff_parser(commands):
+    diff = commands.add_parser(
+        "diff",
+        help="compare selected windows or two rollout dumps",
+        allow_abbrev=False,
+        description=(
+            "Compare inclusive step ranges A and B in one run, or two TRL/verl dumps. "
+            "One dump requires --a and --b in disjoint chronological order. "
+            "Two dumps default to each full observed range. Completions are pooled "
+            "within each exact prompt across each selected range. Exact prompts "
+            "receive equal weight, and both ranges share one feature vocabulary. "
+            "Pairing requires exact prompt content, including chat metadata. "
+            "Approximate 95% normal intervals use measured standard errors. "
+            "Partial prompt overlap leaves the overall interval unavailable. "
+            "Available difference estimates and shared-prompt comparisons remain "
+            "reported. Differences may reflect prompt composition."
+        ),
+    )
+    diff.add_argument("input", type=_nonempty, help="side A dump (or shared dump)")
+    diff.add_argument("other", nargs="?", type=_nonempty, help="optional side B dump")
+    diff.add_argument("--format", choices=["trl", "verl"], required=True, action=_Once)
+    diff.add_argument("--run", type=_nonempty, required=True, action=_Once)
+    diff.add_argument(
+        "--other-format",
+        choices=["trl", "verl"],
+        action=_Once,
+        help="side B format; defaults to --format",
+    )
+    diff.add_argument(
+        "--other-run",
+        type=_nonempty,
+        action=_Once,
+        help="side B run name; defaults to --run",
+    )
+    diff.add_argument("--a", type=_step_range, action=_Once, help="side A START:END")
+    diff.add_argument("--b", type=_step_range, action=_Once, help="side B START:END")
+    diff.add_argument(
+        "--reward-column", type=_nonempty, action=_Once, help="side A TRL reward column"
+    )
+    diff.add_argument(
+        "--other-reward-column",
+        type=_nonempty,
+        action=_Once,
+        help="side B TRL reward column; defaults to reward",
+    )
+    diff.add_argument(
+        "--keyword",
+        type=_nonempty,
+        action="append",
+        default=[],
+        help="literal prompt keyword for mix evidence; repeatable",
+    )
+    diff.add_argument(
+        "--output",
+        type=_nonempty,
+        required=True,
+        action=_Once,
+        help="new comparison JSON path (never overwritten)",
+    )
+    diff.add_argument(
+        "--html",
+        type=_nonempty,
+        action=_Once,
+        help="optional new self-contained HTML path",
+    )
 
 
 def _investigation_parser(commands):
@@ -354,16 +456,185 @@ def _summary(report: dict) -> None:
             )
 
 
+def _source_files(path, format):
+    root = Path(path)
+    if format == "trl":
+        if root.is_dir() and (root / "completions").is_dir():
+            root /= "completions"
+        files = _files(root, _TRL_FILE, "completions_*.parquet")
+    else:
+        files = _files(root, _VERL_FILE, "*.jsonl*")
+    records = []
+    for file in files:
+        with file.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        records.append({"sha256": digest, "size_bytes": file.stat().st_size})
+    return records
+
+
+def _comparison_input(path, format, run, reward_column):
+    before = _source_files(path, format)
+    rows = (
+        load_trl(path, run=run, reward_column=reward_column)
+        if format == "trl"
+        else load_verl(path, run=run)
+    )
+    if before != _source_files(path, format):
+        raise ValueError("comparison source changed while loading")
+    return rows, {
+        "format": format,
+        "files": before,
+        "reward_column": (reward_column or "reward") if format == "trl" else None,
+    }
+
+
+def _saved_report(path):
+    value = _json_object(path)
+    return (
+        validate_comparison_report(value)
+        if value.get("report_type") == "comparison"
+        else validate_report(value)
+    )
+
+
+def _comparison_outputs(outputs):
+    # Prepare complete files before publication; remove only our own links on failure.
+    with ExitStack() as cleanup:
+        staged = []
+        for text, destination in outputs:
+            directory = cleanup.enter_context(
+                TemporaryDirectory(prefix=".rolloutdiff-", dir=destination.parent)
+            )
+            temporary = Path(directory) / "content"
+            _write_text(text, temporary)
+            staged.append((temporary, destination))
+        published = []
+        try:
+            for temporary, destination in staged:
+                published.append((destination, temporary.stat()))
+                os.link(temporary, destination)
+        except BaseException:
+            for destination, owned in reversed(published):
+                try:
+                    current = destination.lstat()
+                    if (current.st_dev, current.st_ino) == (owned.st_dev, owned.st_ino):
+                        destination.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+
+
+def _diff(args):
+    if args.other is None and any(
+        value is not None
+        for value in (
+            args.other_format,
+            args.other_run,
+            args.other_reward_column,
+        )
+    ):
+        raise ValueError("other-side options require a second dump")
+    if args.other is None and (args.a is None or args.b is None):
+        raise ValueError("one-dump comparisons require both --a and --b")
+    other_format = args.other_format or args.format
+    if args.other_reward_column is not None and other_format != "trl":
+        raise ValueError("--other-reward-column requires a TRL second dump")
+    output = Path(args.output)
+    _check_output_path(output)
+    html = Path(args.html) if args.html else None
+    if html is not None:
+        if output.resolve() == html.resolve():
+            raise ValueError("JSON and HTML output paths must differ")
+        _check_output_path(html)
+    a, a_source = _comparison_input(
+        args.input, args.format, args.run, args.reward_column
+    )
+    b, b_source = None, a_source
+    if args.other is not None:
+        b, b_source = _comparison_input(
+            args.other,
+            other_format,
+            args.other_run or args.run,
+            args.other_reward_column,
+        )
+    report = compare_rollouts(a, b, a=args.a, b=args.b, keywords=args.keyword)
+    for side, source in zip(report["sides"], (a_source, b_source), strict=True):
+        side["source"].update(source)
+    encoded = comparison_json(report)
+    rendered = render_comparison_report(report) if html else None
+    outputs = [(encoded, output)]
+    if html is not None:
+        outputs.append((rendered, html))
+    _comparison_outputs(outputs)
+    print(
+        f"Compared {len(report['features'])} features; "
+        f"{report['prompt_mix']['shared_prompts']} shared exact prompts."
+    )
+    leading = [f for f in report["features"] if f["kind"] == "binary"][:3]
+    if leading:
+        print(
+            "Largest prevalence differences (B - A, proportions): "
+            + ", ".join(
+                f"{_terminal(f['feature'])} ({_terminal(f['difference']['estimate'])})"
+                for f in leading
+            )
+        )
+    return 0
+
+
+def _inspect_comparison(args, report):
+    if args.side is None or args.feature is None:
+        raise ValueError("comparison inspection requires --side and --feature")
+    if args.event_rank is not None or args.with_absent:
+        raise ValueError("--event-rank and --with-absent require an analysis report")
+    rows, source = _comparison_input(
+        args.input, args.format, args.run, args.reward_column
+    )
+    expected = next(item for item in report["sides"] if item["side"] == args.side)
+    if expected["source"]["files"] and source != {
+        key: expected["source"][key] for key in source
+    }:
+        raise ValueError("comparison source bytes or loader settings do not match")
+    resolved = resolve_comparison_citations(
+        report, rows, side=args.side, feature=args.feature
+    )
+    lines = [
+        f"Side: {args.side}",
+        f"Feature: {_terminal(args.feature)}",
+        f"Citations: {_terminal(resolved['status'])}",
+    ]
+    for citation in resolved["items"]:
+        lines.append("")
+        for key in (
+            "run",
+            "sample_id",
+            "step",
+            "prompt_id",
+            "feature_value",
+            "reward",
+            "selection_reason",
+        ):
+            lines.append(f"{key}: {_terminal(citation[key])}")
+        lines.append("Response (terminal controls escaped):")
+        lines.extend(
+            f"  {_terminal(line)}" for line in citation["response"].split("\n")
+        )
+    print("\n".join(lines))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     if (
-        args.command in {"analyze", "inspect"}
+        args.command in {"analyze", "inspect", "diff"}
         and args.reward_column is not None
         and args.format != "trl"
     ):
         parser.error("--reward-column is supported only with --format trl")
     try:
+        if args.command == "diff":
+            return _diff(args)
         if args.command == "investigate-aria":
             return _investigation(args)
         if args.command == "replay-aria":
@@ -392,7 +663,13 @@ def main(argv: list[str] | None = None) -> int:
                 else 1
             )
         if args.command == "inspect":
-            report = load_report(args.report)
+            report = _saved_report(args.report)
+            if report.get("report_type") == "comparison":
+                return _inspect_comparison(args, report)
+            if args.event_rank is None:
+                parser.error("analysis inspection requires --event-rank")
+            if args.side is not None or args.feature is not None:
+                raise ValueError("--side and --feature require a comparison report")
             rollouts = (
                 load_trl(args.input, run=args.run, reward_column=args.reward_column)
                 if args.format == "trl"
@@ -410,7 +687,11 @@ def main(argv: list[str] | None = None) -> int:
         output = Path(args.output)
         _check_output_path(output)
         if args.command == "render":
-            report = load_report(args.input)
+            report = _saved_report(args.input)
+            if report.get("report_type") == "comparison":
+                _write_text(render_comparison_report(report), output)
+                print(f"Rendered {len(report['features'])} feature comparisons.")
+                return 0
             _write_text(render_report(report), output)
         else:
             rollouts = (
@@ -423,10 +704,10 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         message = (
             _terminal(exc)
-            if args.command in {"inspect", "replay-aria", "investigate-aria"}
+            if args.command in {"inspect", "diff", "replay-aria", "investigate-aria"}
             else str(exc)
         )
-        print(f"rolloutdiff: error: {message}", file=sys.stderr)
+        print(f"rollout: error: {message}", file=sys.stderr)
         return 1
     if args.command == "analyze":
         _summary(report)

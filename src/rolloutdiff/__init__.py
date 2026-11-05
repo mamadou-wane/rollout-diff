@@ -1,6 +1,13 @@
 """Deterministic, label-free rollout analysis."""
 
 from .adapters import from_table, load_trl, load_verl
+from .comparison import compare_rollouts, resolve_comparison_citations
+from .comparison_report import (
+    comparison_json,
+    load_comparison_report,
+    render_comparison_report,
+    validate_comparison_report,
+)
 from .corroboration import EventWindowEvidence, event_window_corroboration
 from .detect import DetectionResult, detect_sequential
 from .events import EventGrouping, group_events
@@ -51,6 +58,8 @@ __all__ = [
     "approve_aria_intervention",
     "build_report",
     "compare_aria_intervention",
+    "compare_rollouts",
+    "comparison_json",
     "detect_retrospective",
     "detect_sequential",
     "event_window_corroboration",
@@ -59,6 +68,7 @@ __all__ = [
     "featurize",
     "from_table",
     "group_events",
+    "load_comparison_report",
     "load_trl",
     "load_verl",
     "persistence",
@@ -66,12 +76,15 @@ __all__ = [
     "prompt_mix",
     "rank_events",
     "render_aria_comparison",
+    "render_comparison_report",
     "render_report",
     "replay_aria",
+    "resolve_comparison_citations",
     "resolve_exemplars",
     "reward_association",
     "select_exemplars",
     "serialize_replay",
     "split_half_replication",
+    "validate_comparison_report",
     "validate_rollouts",
 ]

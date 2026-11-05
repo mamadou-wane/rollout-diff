@@ -1,7 +1,7 @@
 import json
 import os
 import subprocess
-import sys
+import sysconfig
 import zlib
 from pathlib import Path
 
@@ -67,10 +67,11 @@ def _arguments(source, output, format="trl"):
 
 
 def _subprocess(arguments):
-    source = Path(__file__).resolve().parents[1] / "src"
+    executable = Path(sysconfig.get_path("scripts")) / "rollout"
+    assert executable.is_file(), "reinstall the project to refresh its entry point"
     return subprocess.run(
-        [sys.executable, "-m", "rolloutdiff.cli", *arguments],
-        env=os.environ | {"PYTHONPATH": str(source)},
+        [str(executable), *arguments],
+        env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
         capture_output=True,
         text=True,
         check=False,
