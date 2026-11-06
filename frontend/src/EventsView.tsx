@@ -161,7 +161,7 @@ function eventName(event: Event, headline?: Headline) {
 }
 /** Sign of the shared-prompt change, treating floating-point noise as none. */
 function direction({ before, after }: Headline) {
-  return sameValue(before, after) ? 0 : Math.sign(after - before);
+  return sameValue(after - before, 0) ? 0 : Math.sign(after - before);
 }
 function Change({ headline }: { headline?: Headline }) {
   if (!headline) return <span className="event-change" />;
@@ -214,6 +214,10 @@ function dek(
     );
   else if (evidence.promptmix_status === "no_shared_prompts")
     parts.push("Before and after values are unavailable.");
+  else if (known(evidence.prompt_shared_change))
+    parts.push(
+      `Headline endpoints are unavailable at this numeric precision. Shared-prompt change ${signed(evidence.prompt_shared_change)}.`,
+    );
   const onset = member?.onset_step ?? evidence.onset_step ?? event?.onset_step;
   const alert = member?.alert_step ?? evidence.alert_step ?? event?.alert_step;
   if (known(onset) && known(alert))
@@ -628,7 +632,12 @@ export function EventsView({
                     type="button"
                     key={member.feature}
                     className="link"
-                    onClick={() => setFeature(member.feature)}
+                    onClick={() => {
+                      generation.current++;
+                      setFeature(member.feature);
+                      setError(null);
+                      setInspectBusy(null);
+                    }}
                   >
                     <code>{member.feature}</code>
                   </button>

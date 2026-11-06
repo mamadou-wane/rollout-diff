@@ -80,7 +80,9 @@ function reach(value: Estimate) {
 function scaleFor(largest: number) {
   if (largest <= 0) return 1;
   const power = 10 ** Math.floor(Math.log10(largest));
-  return Math.ceil(largest / power) * power;
+  if (!power) return largest;
+  const rounded = Math.ceil(largest / power) * power;
+  return Number.isFinite(rounded) ? rounded : largest;
 }
 
 function StepInput({
@@ -646,6 +648,8 @@ export function CompareView({
     }
   }
   function toggle(feature: string) {
+    generation.current++;
+    setInspectBusy(null);
     setInspectError(null);
     setSelected((value) => (value === feature ? "" : feature));
   }

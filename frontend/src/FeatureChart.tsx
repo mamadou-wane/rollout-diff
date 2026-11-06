@@ -12,9 +12,11 @@ const BOTTOM = 280;
 function niceTop(value: number) {
   if (value <= 0) return 0;
   const power = 10 ** Math.floor(Math.log10(value));
+  if (!power) return value;
   const fraction = value / power;
   const stops = [1, 1.5, 2, 3, 4, 5, 6, 8, 10];
-  return (stops.find((stop) => fraction <= stop + 1e-9) ?? 10) * power;
+  const rounded = (stops.find((stop) => fraction <= stop + 1e-9) ?? 10) * power;
+  return Number.isFinite(rounded) ? rounded : value;
 }
 function useWidth(fallback: number) {
   const ref = useRef<HTMLDivElement>(null);
@@ -51,7 +53,8 @@ export function FeatureChart({
   const low = bounds.length ? Math.min(0, ...bounds) : 0;
   const top = niceTop(high);
   const bottom = low < 0 ? -niceTop(-low) : 0;
-  const span = top - bottom || 1;
+  const divisor = Number.isFinite(top - bottom) ? 1 : 2;
+  const span = top / divisor - bottom / divisor || 1;
   const steps = points.map((point) => BigInt(String(point.step)));
   const first = steps[0] ?? 0n,
     last = steps[steps.length - 1] ?? first;
@@ -64,7 +67,7 @@ export function FeatureChart({
       (right - LEFT);
   const x = (index: number) => position(steps[index]);
   const y = (value: number) =>
-    BOTTOM - ((value - bottom) / span) * (BOTTOM - TOP);
+    BOTTOM - ((value / divisor - bottom / divisor) / span) * (BOTTOM - TOP);
   const same = (left: unknown, step: Step) =>
     known(left) && String(left) === String(step);
 
@@ -159,6 +162,11 @@ export function FeatureChart({
       <div ref={ref}>
         {!points.length ? (
           <p className="unavailable">No observations for this feature.</p>
+        ) : !bounds.every(Number.isFinite) ? (
+          <p className="unavailable">
+            Curve unavailable: uncertainty bounds exceed the numeric plotting
+            range. Exact observations remain in the table.
+          </p>
         ) : (
           <svg
             className="chart"

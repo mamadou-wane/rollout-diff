@@ -103,7 +103,7 @@ export function FilePicker({
         </div>
         <p className="dek">
           {mode === "run"
-            ? "Choose TRL parquet or verl JSONL. Analysis stays on this machine, and files stay inside the launch root."
+            ? "Choose TRL completions_<step>.parquet or verl <step>.jsonl files, or a directory containing them. Analysis stays on this machine, inside the launch root."
             : "Choose a saved evidence file. Reading stays on this machine, and files stay inside the launch root."}
         </p>
         <p className="picker-path">

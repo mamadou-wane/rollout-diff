@@ -367,6 +367,31 @@ describe("local investigation", () => {
       "0.2",
     ]);
     expect(figures(0, 1.85e-17)).toEqual(["0", "0"]);
+    expect(figures(1e16, 1e16 + 100)).toEqual([
+      "10000000000000000", "10000000000000100",
+    ]);
+  });
+  it("keeps a representable shared change visible at a large offset", async () => {
+    serve((url) => url.includes("/events/7") ? {
+      event,
+      evidence: [{ feature: "call:check" }], prompt_shifts: [],
+      headlines: { "call:check": { before: 1e16, after: 1e16 + 100, n_prompts: 3 } },
+    } : undefined);
+    render(<App />);
+    expect(await screen.findByRole("heading", {
+      name: "call:check rose from 10000000000000000 to 10000000000000100", level: 1,
+    })).toBeInTheDocument();
+  });
+  it("keeps shared change visible when headline endpoints are unavailable", async () => {
+    serve((url) => url.includes("/events/7") ? {
+      event,
+      evidence: [{ feature: "call:check", prompt_shared_change: 1 }],
+      prompt_shifts: [], headlines: {},
+    } : undefined);
+    render(<App />);
+    expect(await screen.findByText(
+      /Headline endpoints are unavailable at this numeric precision\. Shared-prompt change \+1\./,
+    )).toBeInTheDocument();
   });
   it("reports partial persistence with its numbers", async () => {
     serve((url) =>
@@ -698,6 +723,48 @@ describe("comparison and saved evidence", () => {
 });
 
 describe("stale responses and exact chart evidence", () => {
+  it("ignores a pending citation after selecting another event member", async () => {
+    let finish: (response: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    const grouped = {
+      ...event,
+      n_members: 2,
+      members: [
+        ...event.members,
+        { ...event.members[0], feature: "call:other", exemplars: [] },
+      ],
+    };
+    serve((url) =>
+      url.includes("/events?")
+        ? { total: 1, events: [grouped] }
+        : url.includes("/events/7")
+          ? { event: grouped, evidence: [], prompt_shifts: [] }
+          : url.includes("/inspect")
+            ? pending
+            : undefined,
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", { name: /^Read response sample-1/ }),
+    );
+    await user.click(screen.getByRole("button", { name: "call:other" }));
+    await screen.findByRole("heading", { name: "call:other", level: 1 });
+    await act(async () => {
+      finish(
+        new Response(
+          JSON.stringify({
+            citation: { sample_id: "sample-1", response: "old member" },
+            source: run.source,
+            response_sha256: "b".repeat(64),
+          }),
+        ),
+      );
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
   it("ignores delayed event details after a newer event is selected", async () => {
     let resolveOld: (response: Response) => void = () => {};
     const old = new Promise<Response>((resolve) => {
@@ -760,6 +827,49 @@ describe("stale responses and exact chart evidence", () => {
     );
     expect(container.querySelectorAll(".error-bar")).toHaveLength(2);
     expect(container.querySelectorAll(".uncertain-point")).toHaveLength(1);
+  });
+  it("keeps finite high-magnitude observations readable in the curve", () => {
+    const point = { ...series.points[0], mean: 1.7e308, se: 1e306 };
+    const extreme = {
+      ...series,
+      kind: "continuous",
+      points: [point, { ...point, step: 2, mean: -1.7e308 }],
+    };
+    const { container } = render(<FeatureChart series={extreme} />);
+    const coordinates = [...container.querySelectorAll("svg *")].flatMap(
+      (element) =>
+        [...element.attributes]
+          .filter((attribute) =>
+            ["x", "y", "x1", "x2", "y1", "y2", "cx", "cy", "d"].includes(
+              attribute.name,
+            ),
+          )
+          .map((attribute) => attribute.value),
+    );
+    expect(
+      coordinates.filter((value) => /NaN|Infinity/.test(value)),
+    ).toEqual([]);
+    const dots = container.querySelectorAll(".mean-point");
+    expect(Number(dots[0].getAttribute("cy"))).toBeLessThan(
+      Number(dots[1].getAttribute("cy")),
+    );
+    expect(screen.getAllByText("1.7e+308").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("-1.7e+308").length).toBeGreaterThan(0);
+  });
+  it("keeps observations available when uncertainty exceeds plotting range", () => {
+    const { container } = render(
+      <FeatureChart
+        series={{
+          ...series,
+          kind: "continuous",
+          points: [{ ...series.points[0], mean: 1.7e308, se: 1.7e308 }],
+        }}
+      />,
+    );
+    expect(container.querySelector("svg")).toBeNull();
+    expect(screen.getByText(/uncertainty bounds exceed/)).toBeInTheDocument();
+    const table = screen.getByRole("table", { hidden: true });
+    expect(within(table).getAllByText("1.7e+308")).toHaveLength(2);
   });
 });
 

@@ -806,3 +806,63 @@ def test_headline_is_absent_without_shared_prompts():
         prompt_values = pd.DataFrame(columns=["run", "feature"])
 
     assert _headlines(Empty, ["kept"]) == {}
+
+
+def test_headline_cancellation_preserves_the_available_shared_change(tmp_path):
+    directory = tmp_path / "rollouts"
+    directory.mkdir()
+    for step in range(1, 22):
+        rows = []
+        for prompt in range(4):
+            identity = prompt if step <= 15 or prompt < 2 else prompt + 2
+            reward = 1e16
+            if step > 15:
+                reward += 2 if prompt == 0 else 0 if prompt == 1 else 100
+            for completion in range(2):
+                rows.append(
+                    {
+                        "step": step,
+                        "input": f"prompt {identity}",
+                        "output": "plain.",
+                        "score": reward,
+                        "sample_id": f"{step}:{prompt}:{completion}",
+                    }
+                )
+        (directory / f"{step}.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows)
+        )
+    with api(tmp_path) as client:
+        prefix = f"/api/runs/{load_run(client)['id']}"
+        series = client.get(prefix + "/series", params={"feature": "scalar:reward"})
+        assert series.status_code == 200
+        assert series.json()["evidence"]["prompt_shared_change"] == 1
+        assert series.json()["headline"] is None
+        listing = client.get(prefix + "/events").json()
+        event = next(
+            event
+            for event in listing["events"]
+            if event["representative_feature"] == "scalar:reward"
+        )
+        assert "scalar:reward" not in listing["headlines"]
+        detail = client.get(prefix + f"/events/{event['rank']}").json()
+        assert "scalar:reward" not in detail["headlines"]
+
+
+def test_headline_omits_nonfinite_endpoint_means():
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from rolloutdiff.app import _headlines
+
+    analysis = SimpleNamespace(
+        prompt_values=pd.DataFrame(
+            {
+                "feature": ["scalar:reward"] * 2,
+                "before_mean": [1.7e308] * 2,
+                "after_mean": [1.7e308] * 2,
+                "change": [0.0] * 2,
+            }
+        )
+    )
+    assert _headlines(analysis, ["scalar:reward"]) == {}

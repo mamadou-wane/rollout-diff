@@ -452,22 +452,28 @@ def _rows(frame, features):
 
 
 def _headlines(analysis, features):
-    """Equal-weight prompt means whose difference is `prompt_shared_change`.
-
-    Features without an exact prompt in both windows are omitted.
-    """
+    """Equal-weight shared-prompt means; omit numerically misleading pairs."""
     values = analysis.prompt_values
     if "change" not in values:
         return {}
     shared = values.loc[values.feature.isin(features) & values.change.notna()]
-    return {
-        feature: {
-            "before": rows.before_mean.mean(),
-            "after": rows.after_mean.mean(),
-            "n_prompts": len(rows),
-        }
-        for feature, rows in shared.groupby("feature", sort=False)
-    }
+    result = {}
+    for feature, rows in shared.groupby("feature", sort=False):
+        with np.errstate(over="ignore", invalid="ignore"):
+            before, after, change = (
+                float(rows[column].mean())
+                for column in ("before_mean", "after_mean", "change")
+            )
+        # Rounded endpoints can hide an available per-prompt difference.
+        if all(
+            math.isfinite(value) for value in (before, after, change)
+        ) and math.isclose(after - before, change, rel_tol=1e-10, abs_tol=1e-12):
+            result[feature] = {
+                "before": before,
+                "after": after,
+                "n_prompts": len(rows),
+            }
+    return result
 
 
 def _citation(item, citation):

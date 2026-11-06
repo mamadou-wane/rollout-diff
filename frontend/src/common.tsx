@@ -15,7 +15,7 @@ export function known(value: unknown) {
 export function plural(count: unknown, noun: string) {
   return `${text(count)} ${noun}${String(count) === "1" ? "" : "s"}`;
 }
-/** Equal up to floating-point noise, with the tolerances of comparison.py. */
+/** Display equality with a small rounding tolerance. */
 export function sameValue(a: number, b: number) {
   return Math.abs(a - b) <= 1e-12 * Math.max(1, Math.abs(a), Math.abs(b));
 }
@@ -34,7 +34,7 @@ export function figure(value: unknown): string {
 }
 /** Round two values for display, keeping unequal values visibly distinct. */
 export function figures(a: number, b: number): [string, string] {
-  if (sameValue(a, b)) return [figure(a), figure(a)];
+  if (sameValue(a - b, 0)) return [figure(a), figure(a)];
   if (figure(a) !== figure(b)) return [figure(a), figure(b)];
   let digits = 4;
   while (Number(a.toPrecision(digits)) === Number(b.toPrecision(digits)))

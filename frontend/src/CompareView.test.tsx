@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CompareView } from "./CompareView";
@@ -386,6 +386,34 @@ describe("timeline", () => {
 });
 
 describe("results", () => {
+  it("ignores a pending citation after expanding another feature", async () => {
+    let finish: (value: object) => void = () => {};
+    const pending = new Promise<object>((resolve) => {
+      finish = resolve;
+    });
+    serve((url, init) =>
+      url.endsWith("/inspect")
+        ? pending
+        : respond(ready([feature("def:first"), feature("def:second")]))(
+            url,
+            init,
+          ),
+    );
+    const user = userEvent.setup();
+    const { onCitation } = view();
+    await submitted(user);
+    await user.click(await screen.findByRole("button", { name: "def:first" }));
+    await user.click(screen.getByRole("button", { name: /Read response 16:0:0/ }));
+    await user.click(screen.getByRole("button", { name: "def:second" }));
+    await act(async () => {
+      finish({ citation: { sample_id: "16:0:0", response: "old feature" } });
+    });
+    expect(onCitation).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "def:second" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
   it("states the overlap counts", async () => {
     serve(respond(ready([feature("def:solve")])));
     const user = userEvent.setup();
@@ -530,6 +558,32 @@ describe("results", () => {
     const plot = await screen.findByRole("img");
     expect(plot.querySelector("circle")).toHaveAttribute("cx", "75%");
     expect(screen.getByText("+0.1")).toBeInTheDocument();
+  });
+  it("keeps a finite extreme shared change away from the zero marker", async () => {
+    serve(
+      respond(
+        ready([
+          feature("scalar:reward", {
+            kind: "continuous",
+            paired: {
+              estimate: 1.7e308,
+              se: null,
+              ci_low: null,
+              ci_high: null,
+              status: "numeric_unavailable",
+            },
+          }),
+        ]),
+      ),
+    );
+    const user = userEvent.setup();
+    view();
+    await submitted(user);
+    const plot = await screen.findByRole("img");
+    expect(plot.querySelector("circle")).toHaveAttribute("cx", "100%");
+    expect(plot).toHaveAccessibleName(
+      "Shared-prompt change +1.7e+308, interval unavailable, numeric unavailable.",
+    );
   });
   it("keeps report order within each group", async () => {
     const paired = (estimate: number | null) => ({
