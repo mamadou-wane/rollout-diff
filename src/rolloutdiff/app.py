@@ -451,6 +451,25 @@ def _rows(frame, features):
     return frame.loc[frame.feature.isin(features)].to_dict("records")
 
 
+def _headlines(analysis, features):
+    """Equal-weight prompt means whose difference is `prompt_shared_change`.
+
+    Features without an exact prompt in both windows are omitted.
+    """
+    values = analysis.prompt_values
+    if "change" not in values:
+        return {}
+    shared = values.loc[values.feature.isin(features) & values.change.notna()]
+    return {
+        feature: {
+            "before": rows.before_mean.mean(),
+            "after": rows.after_mean.mean(),
+            "n_prompts": len(rows),
+        }
+        for feature, rows in shared.groupby("feature", sort=False)
+    }
+
+
 def _citation(item, citation):
     response = citation["response"]
     digest = hashlib.sha256(response.encode()).hexdigest()
@@ -705,8 +724,16 @@ def create_app(root, *, token: str, origin="http://127.0.0.1:8765") -> FastAPI:
             ):
                 continue
             selected.append(event)
+        page = selected[offset : offset + limit]
         return _view(
-            {"total": len(selected), "events": selected[offset : offset + limit]}
+            {
+                "total": len(selected),
+                "events": page,
+                "headlines": _headlines(
+                    item["analysis"],
+                    [event["representative_feature"] for event in page],
+                ),
+            }
         )
 
     @app.get("/api/runs/{identity}/events/{rank}")
@@ -724,8 +751,14 @@ def create_app(root, *, token: str, origin="http://127.0.0.1:8765") -> FastAPI:
                 "event": selected,
                 "evidence": _rows(item["analysis"].evidence, names),
                 "prompt_shifts": _rows(item["analysis"].prompt_shifts, names),
+                "headlines": _headlines(item["analysis"], names),
             }
         )
+
+    @app.get("/api/runs/{identity}/steps")
+    def steps(identity: str):
+        rollouts = store.run(identity)["rollouts"]
+        return _view({"steps": sorted(rollouts.step.unique().tolist())})
 
     @app.get("/api/runs/{identity}/features")
     def features(
@@ -738,13 +771,16 @@ def create_app(root, *, token: str, origin="http://127.0.0.1:8765") -> FastAPI:
         catalog = catalog.loc[
             catalog.feature.str.contains(q, case=False, regex=False)
         ].sort_values("feature")
-        return _view({"features": catalog.head(limit).to_dict("records")})
+        return _view(
+            {"total": len(catalog), "features": catalog.head(limit).to_dict("records")}
+        )
 
     @app.get("/api/runs/{identity}/series")
     def series(
         identity: str, feature: Annotated[str, Query(min_length=1, max_length=4096)]
     ):
-        analysis = store.run(identity)["analysis"]
+        item = store.run(identity)
+        analysis = item["analysis"]
         evidence = _rows(analysis.evidence, [feature])
         if not evidence:
             raise HTTPException(404, "Feature was not found.")
@@ -753,11 +789,21 @@ def create_app(root, *, token: str, origin="http://127.0.0.1:8765") -> FastAPI:
                 "feature": feature,
                 "kind": evidence[0]["kind"],
                 "tier": evidence[0]["tier"],
+                "direction": next(
+                    (
+                        member["direction"]
+                        for event in item["report"]["runs"][0]["events"]
+                        for member in event["members"]
+                        if member["feature"] == feature
+                    ),
+                    None,
+                ),
                 "points": _rows(analysis.aggregation.series, [feature]),
                 "evidence": evidence[0],
                 "persistence": _rows(analysis.persistence_steps, [feature]),
                 "prompt_values": _rows(analysis.prompt_values, [feature]),
                 "prompt_shifts": _rows(analysis.prompt_shifts, [feature]),
+                "headline": _headlines(analysis, [feature]).get(feature),
             }
         )
 

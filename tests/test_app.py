@@ -703,3 +703,106 @@ def test_app_refuses_missing_secure_descriptor_capability_before_startup(
     monkeypatch.delattr(module.os, "O_NOFOLLOW")
     with pytest.raises(ValueError, match=r"macOS or Linux.*descriptor.*no-follow"):
         module.create_app(tmp_path, token=TOKEN)
+
+
+def test_headline_values_equal_shared_prompt_change(tmp_path):
+    write_run(tmp_path)
+    with api(tmp_path) as client:
+        prefix = f"/api/runs/{load_run(client)['id']}"
+        listing = client.get(prefix + "/events").json()
+        event = listing["events"][0]
+        detail = client.get(prefix + f"/events/{event['rank']}").json()
+        for row in detail["evidence"]:
+            feature = row["feature"]
+            series = client.get(prefix + "/series", params={"feature": feature}).json()
+            headline = series["headline"]
+            assert detail["headlines"][feature] == headline
+            assert headline["after"] - headline["before"] == pytest.approx(
+                row["prompt_shared_change"]
+            )
+            assert headline["n_prompts"] == row["prompt_shared_prompts"]
+            assert series["direction"] in {"up", "down"}
+        assert (
+            listing["headlines"][event["representative_feature"]]
+            == detail["headlines"][event["representative_feature"]]
+        )
+
+
+def test_run_without_alerts_has_no_headlines(tmp_path):
+    directory = tmp_path / "rollouts"
+    directory.mkdir()
+    for step in range(1, 24):
+        rows = [
+            {
+                "step": step,
+                "input": f"private prompt {prompt}",
+                "output": "plain words.",
+                "score": 0,
+                "sample_id": f"s-{step}-{prompt}-{j}",
+            }
+            for prompt in range(6)
+            for j in range(2)
+        ]
+        (directory / f"{step}.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows), encoding="utf-8"
+        )
+    with api(tmp_path) as client:
+        prefix = f"/api/runs/{load_run(client)['id']}"
+        listing = client.get(prefix + "/events")
+        assert listing.status_code == 200
+        assert listing.json()["events"] == []
+        assert listing.json()["headlines"] == {}
+        series = client.get(prefix + "/series", params={"feature": "scalar:reward"})
+        assert series.status_code == 200
+        assert series.json()["headline"] is None
+        assert series.json()["direction"] is None
+
+
+def test_features_report_the_total_before_the_limit(tmp_path):
+    write_run(tmp_path)
+    with api(tmp_path) as client:
+        prefix = f"/api/runs/{load_run(client)['id']}"
+        limited = client.get(prefix + "/features", params={"limit": 2}).json()
+        everything = client.get(prefix + "/features", params={"limit": 5000}).json()
+        assert len(limited["features"]) == 2
+        assert limited["total"] == everything["total"] == len(everything["features"])
+
+
+def test_steps_lists_observed_steps_in_order(tmp_path):
+    write_run(tmp_path)
+    with api(tmp_path) as client:
+        prefix = f"/api/runs/{load_run(client)['id']}"
+        steps = client.get(prefix + "/steps").json()["steps"]
+        feature = client.get(prefix + "/events").json()["events"][0][
+            "representative_feature"
+        ]
+        points = client.get(prefix + "/series", params={"feature": feature}).json()[
+            "points"
+        ]
+        assert steps == sorted(steps)
+        assert {point["step"] for point in points} <= set(steps)
+
+
+def test_headline_is_absent_without_shared_prompts():
+    import pandas as pd
+
+    from rolloutdiff.app import _headlines
+
+    class Analysis:
+        prompt_values = pd.DataFrame(
+            {
+                "feature": ["kept", "kept", "kept", "split", "split"],
+                "before_mean": [0.0, 0.5, None, 0.2, None],
+                "after_mean": [1.0, 0.5, 0.9, None, 0.4],
+                "change": [1.0, 0.0, None, None, None],
+            }
+        )
+
+    assert _headlines(Analysis, ["kept", "split", "unknown"]) == {
+        "kept": {"before": 0.25, "after": 0.75, "n_prompts": 2}
+    }
+
+    class Empty:
+        prompt_values = pd.DataFrame(columns=["run", "feature"])
+
+    assert _headlines(Empty, ["kept"]) == {}

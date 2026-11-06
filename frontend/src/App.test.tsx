@@ -9,6 +9,8 @@ const event = {
   rank: 7,
   representative_feature: "call:check",
   ranking_status: "behavioral",
+  onset_start: 3,
+  onset_end: 3,
   onset_step: 3,
   alert_step: 5,
   n_members: 1,
@@ -40,7 +42,19 @@ const run = {
   id: "r1",
   run: "fixture",
   status: "ready",
-  counts: { rollouts: 30, events: 1 },
+  counts: {
+    rollouts: 30,
+    observed_steps: 3,
+    prompts: 2,
+    series: 4,
+    screened_series: 4,
+    sequential_alerts: 1,
+    unscorable_series: 0,
+    events: 1,
+    behavioral_events: 1,
+    contextual_events: 0,
+    other_events: 0,
+  },
   source: {
     path: "run.jsonl",
     canonical_sha256: "a".repeat(64),
@@ -169,16 +183,14 @@ describe("local investigation", () => {
     render(<App />);
     await user.click(await screen.findByRole("button", { name: /Event 7/ }));
     await user.click(
-      await screen.findByRole("button", { name: /Inspect sample-1/ }),
+      await screen.findByRole("button", { name: /Read response sample-1/ }),
     );
     const drawer = await screen.findByRole("dialog", {
       name: "Original response",
     });
-    expect(
-      within(drawer).getByText("<script>alert(1)</script>\nraw exact text", {
-        normalizer: (value) => value,
-      }),
-    ).toBeInTheDocument();
+    expect(drawer.querySelector("pre.response")?.textContent).toBe(
+      "<script>alert(1)</script>\nraw exact text",
+    );
     expect(drawer.querySelector("script")).toBeNull();
     expect(within(drawer).getByText("b".repeat(64))).toBeInTheDocument();
     expect(within(drawer).getByText("absent response")).toBeInTheDocument();
@@ -200,9 +212,11 @@ describe("local investigation", () => {
     render(<App />);
     await screen.findByRole("button", { name: /Event 7/ });
     await user.type(screen.getByLabelText("Search events"), "check");
-    await user.selectOptions(
-      screen.getByLabelText("Evidence class"),
-      "behavioral",
+    await user.click(
+      within(screen.getByRole("group", { name: "Evidence class" })).getByRole(
+        "button",
+        { name: "Behavioral" },
+      ),
     );
     await user.click(screen.getByRole("button", { name: "Next events" }));
     await waitFor(() =>
@@ -245,9 +259,261 @@ describe("local investigation", () => {
           ),
       ).toBe(true),
     );
-    await waitFor(() =>
-      expect(screen.getByLabelText("Loaded run")).toHaveDisplayValue("second · ready"),
+    await user.click(
+      await screen.findByRole("button", { name: "Run second, ready" }),
     );
+    expect(screen.getByLabelText("Loaded run")).toHaveDisplayValue(
+      "second, ready",
+    );
+  });
+  it("opens the first event and states shared-prompt values in its headline", async () => {
+    const headline = { before: 0.02, after: 0.41, n_prompts: 6 };
+    const evidence = {
+      feature: "call:check",
+      promptmix_status: "available",
+      prompt_before_start: 1,
+      prompt_before_end: 2,
+      prompt_after_start: 3,
+      prompt_after_end: 5,
+    };
+    serve((url) =>
+      url.includes("/events/7")
+        ? {
+            event,
+            evidence: [evidence],
+            prompt_shifts: [],
+            headlines: { "call:check": headline },
+          }
+        : url.includes("/events?")
+          ? { total: 1, events: [event], headlines: { "call:check": headline } }
+          : undefined,
+    );
+    render(<App />);
+    expect(
+      await screen.findByRole("heading", {
+        name: "call:check rose from 0.02 to 0.41",
+        level: 1,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/baseline steps 1 to 2 against onset to first alert/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("0.02 → 0.41")).toBeInTheDocument();
+  });
+  it("shows no values in the headline without shared prompts", async () => {
+    serve((url) =>
+      url.includes("/events/7")
+        ? {
+            event,
+            evidence: [
+              { feature: "call:check", promptmix_status: "no_shared_prompts" },
+            ],
+            prompt_shifts: [],
+            headlines: {},
+          }
+        : undefined,
+    );
+    render(<App />);
+    expect(
+      await screen.findByRole("heading", {
+        name: "call:check has no prompts shared across its windows",
+        level: 1,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Before and after values are unavailable/),
+    ).toBeInTheDocument();
+  });
+  it("reads floating-point noise as no change and scopes it to shared prompts", async () => {
+    const headline = {
+      before: 0.20000000000000004,
+      after: 0.19999999999999998,
+      n_prompts: 3,
+    };
+    serve((url) =>
+      url.includes("/events/7")
+        ? {
+            event: {
+              ...event,
+              members: [{ ...event.members[0], direction: "up" }],
+            },
+            evidence: [{ feature: "call:check" }],
+            prompt_shifts: [],
+            headlines: { "call:check": headline },
+          }
+        : undefined,
+    );
+    render(<App />);
+    expect(
+      await screen.findByRole("heading", {
+        name: "call:check stayed at 0.2 across shared prompts",
+        level: 1,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/shared prompts show no net change/),
+    ).toBeInTheDocument();
+  });
+  it("keeps close values distinct and never rounds a prevalence up to one", async () => {
+    const { figure, figures } = await import("./common");
+    expect(figure(0.9996)).toBe("0.9996");
+    expect(figure(1)).toBe("1");
+    expect(figure(0.9999999999999999)).toBe("1");
+    expect(figure(1.0000000000000002)).toBe("1");
+    expect(figures(12345.2, 12345.4)).toEqual(["12345.2", "12345.4"]);
+    expect(figures(0.02, 0.41)).toEqual(["0.02", "0.41"]);
+    expect(figures(0.20000000000000004, 0.19999999999999998)).toEqual([
+      "0.2",
+      "0.2",
+    ]);
+    expect(figures(0, 1.85e-17)).toEqual(["0", "0"]);
+  });
+  it("reports partial persistence with its numbers", async () => {
+    serve((url) =>
+      url.includes("/events/7")
+        ? {
+            event: {
+              ...event,
+              members: [
+                {
+                  ...event.members[0],
+                  evidence: {
+                    ...event.members[0].evidence,
+                    persistence: {
+                      status: "partial",
+                      n_retained: 4,
+                      n_evaluable: 5,
+                      n_unavailable: 1,
+                      coverage: 0.83,
+                    },
+                  },
+                },
+              ],
+            },
+            evidence: [
+              {
+                feature: "call:check",
+                retrospective_status: "no_change",
+              },
+            ],
+            prompt_shifts: [],
+          }
+        : undefined,
+    );
+    render(<App />);
+    expect(
+      await screen.findByText(
+        "Retained at 4 of 5 evaluable steps after the first alert. Coverage 0.83; 1 step without a measured SE.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("The retrospective detector selected no change point."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Retrospective onset/)).not.toBeInTheDocument();
+  });
+  it("discards a citation that resolves after the user changed tabs", async () => {
+    let finish: (response: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    serve((url) => (url.includes("/inspect") ? pending : undefined));
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", { name: /^Read response sample-1/ }),
+    );
+    await user.click(screen.getByRole("tab", { name: "Compare" }));
+    await act(async () =>
+      finish(
+        new Response(
+          JSON.stringify({
+            citation: { sample_id: "sample-1", step: 5, response: "late" },
+            source: run.source,
+            response_sha256: "b".repeat(64),
+          }),
+        ),
+      ),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+  it("closes the run menu on Escape and returns focus to its trigger", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const trigger = await screen.findByRole("button", {
+      name: "Run fixture, ready",
+    });
+    await user.click(trigger);
+    const unload = await screen.findByRole("button", { name: "Unload run" });
+    unload.focus();
+    await user.keyboard("{Escape}");
+    expect(
+      screen.queryByRole("region", { name: "Run summary" }),
+    ).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+  it("unloads a run from the run menu", async () => {
+    serve((url, init) =>
+      url === "/api/runs/r1" && init?.method === "DELETE"
+        ? new Response(null, { status: 204 })
+        : undefined,
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", { name: "Run fixture, ready" }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Unload run" }));
+    expect(
+      await screen.findByRole("heading", { name: "Load a rollout run to begin" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load run" })).toHaveFocus();
+  });
+  it("states when no persistence observations follow an alert", async () => {
+    const user = userEvent.setup();
+    render(<FeatureChart series={series} />);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Show persistence and prompts per step",
+      }),
+    );
+    expect(
+      screen.getByText(/No persistence observations follow an alert/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Kept")).not.toBeInTheDocument();
+  });
+  it("reconciles a browsed feature with its alert direction", async () => {
+    serve((url) =>
+      url.includes("/series?")
+        ? {
+            ...series,
+            direction: "up",
+            headline: { before: 0.4, after: 0.1, n_prompts: 1 },
+          }
+        : url.includes("/events?")
+          ? { total: 0, events: [] }
+          : undefined,
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByText("Browse all features"));
+    await user.click(
+      await screen.findByRole("button", { name: "Feature call:check" }),
+    );
+    expect(
+      await screen.findByText(/the shared-prompt mean moved the other way/),
+    ).toHaveTextContent("Sequential streak began at step 3; first alert at step 5.");
+  });
+  it("explains a run without events without calling it a negative result", async () => {
+    serve((url) =>
+      url.includes("/events?") ? { total: 0, events: [] } : undefined,
+    );
+    render(<App />);
+    expect(
+      await screen.findByRole("heading", { name: "No events in this run" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Unscorable series are missing evidence/),
+    ).toBeInTheDocument();
   });
   it("shows explicit API failure without a false empty result", async () => {
     serve((url) =>
@@ -356,9 +622,9 @@ describe("comparison and saved evidence", () => {
       await user.type(screen.getByLabelText(name), value);
     await user.click(screen.getByRole("button", { name: "Compare windows" }));
     expect(
-      (await screen.findAllByText("no shared prompts")).length,
-    ).toBeGreaterThan(0);
-    expect(screen.getByText("Paired estimate")).toBeInTheDocument();
+      await screen.findByText("Unavailable: no shared prompts"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Shared-prompt change")).toBeInTheDocument();
     expect(
       vi
         .mocked(fetch)
@@ -457,14 +723,14 @@ describe("stale responses and exact chart evidence", () => {
     await user.click(await screen.findByRole("button", { name: /Event 7/ }));
     await user.click(screen.getByRole("button", { name: /Event 8/ }));
     expect(
-      await screen.findByRole("heading", { name: "call:new", level: 2 }),
+      await screen.findByRole("heading", { name: /call:new/, level: 1 }),
     ).toBeInTheDocument();
     resolveOld(
       new Response(JSON.stringify({ event, evidence: [], prompt_shifts: [] })),
     );
     await waitFor(() =>
       expect(
-        screen.queryByRole("heading", { name: "call:check", level: 2 }),
+        screen.queryByRole("heading", { name: /call:check/, level: 1 }),
       ).not.toBeInTheDocument(),
     );
   });
@@ -483,7 +749,9 @@ describe("stale responses and exact chart evidence", () => {
     };
     const { container } = render(<FeatureChart series={exact} />);
     expect(screen.getByText("Onset 9007199254740994")).toBeInTheDocument();
-    expect(screen.getByText("Alert 9007199254741000")).toBeInTheDocument();
+    expect(
+      screen.getByText("First alert 9007199254741000"),
+    ).toBeInTheDocument();
     const paths = container.querySelectorAll(".mean-line");
     expect(paths).toHaveLength(2);
     const points = container.querySelectorAll("circle");
@@ -598,7 +866,7 @@ it("can retry a failed background comparison status request", async () => {
   );
   await user.click(screen.getByRole("button", { name: "Retry" }));
   expect(
-    await screen.findByRole("heading", { name: "Comparison evidence" }),
+    await screen.findByRole("heading", { name: "What changed" }),
   ).toBeInTheDocument();
 });
 
@@ -635,7 +903,7 @@ describe("same-document session launch", () => {
     render(<App />);
     await user.click(await screen.findByRole("button", { name: /Event 7/ }));
     await user.click(
-      await screen.findByRole("button", { name: "Inspect sample-1" }),
+      await screen.findByRole("button", { name: /^Read response sample-1/ }),
     );
     expect(
       await screen.findByRole("dialog", { name: "Original response" }),

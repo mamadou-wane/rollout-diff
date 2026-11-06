@@ -1,14 +1,180 @@
-import { useEffect, useState } from "react";
-import { initializeToken, request } from "./api";
-import { Badge, ErrorNotice, Fields, text } from "./common";
+import { useEffect, useRef, useState } from "react";
+import { downloadReport, initializeToken, request } from "./api";
+import { ErrorNotice, figure, known, runCounts, text } from "./common";
 import { CompareView } from "./CompareView";
 import { EventsView } from "./EventsView";
 import { EvidenceView } from "./EvidenceView";
 import { FilePicker } from "./FilePicker";
 import { ResponseDrawer } from "./ResponseDrawer";
-import type { Citation, Evidence, Run } from "./types";
+import type {
+  Citation,
+  CompareSeed,
+  Evidence,
+  ReaderContext,
+  Run,
+} from "./types";
 
 type Tab = "Events" | "Compare" | "Saved evidence";
+const TABS: Tab[] = ["Events", "Compare", "Saved evidence"];
+const STAGES: Record<string, string> = {
+  queued: "Run queued",
+  loading: "Reading source files",
+  analyzing: "Analyzing rollout evidence",
+};
+function RunMenu({
+  run,
+  runs,
+  rootLabel,
+  onSelect,
+  onUnload,
+}: {
+  run: Run;
+  runs: Run[];
+  rootLabel?: string;
+  onSelect: (id: string) => void;
+  onUnload: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false),
+    [error, setError] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null),
+    trigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (ref.current?.contains(document.activeElement))
+        trigger.current?.focus();
+      setOpen(false);
+    };
+    const onPointer = (event: PointerEvent) => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onPointer);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onPointer);
+    };
+  }, [open]);
+  async function exportFile(format: string) {
+    setError(null);
+    try {
+      await downloadReport(
+        `/api/runs/${run.id}/export?format=${format}`,
+        `rollout-report.${format}`,
+      );
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Export failed.");
+    }
+  }
+  async function unload() {
+    setError(null);
+    try {
+      await onUnload();
+      trigger.current?.focus();
+      setOpen(false);
+    } catch (error) {
+      setError(
+        error instanceof Error ? error.message : "Unable to unload run.",
+      );
+    }
+  }
+  return (
+    <div
+      className="run-menu"
+      ref={ref}
+      onBlur={(event) => {
+        if (event.relatedTarget && !ref.current?.contains(event.relatedTarget))
+          setOpen(false);
+      }}
+    >
+      <button
+        ref={trigger}
+        type="button"
+        className="link"
+        aria-expanded={open}
+        aria-label={`Run ${run.run}, ${run.status}`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <code>{run.run}</code>
+      </button>
+      {open && (
+        <section className="popover" aria-label="Run summary">
+          {runs.length > 1 && (
+            <label className="popover-field">
+              Loaded run
+              <select
+                value={run.id}
+                onChange={(event) => onSelect(event.target.value)}
+              >
+                {runs.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.run}, {item.status}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {run.counts ? (
+            <>
+              <p>{runCounts(run.counts)}</p>
+              <p className="section-note">
+                {text(run.counts.unscorable_series)} of{" "}
+                {text(run.counts.series)} series were unscorable.
+              </p>
+            </>
+          ) : (
+            <p className="section-note">Status: {run.status}.</p>
+          )}
+          {run.source && (
+            <p className="section-note">
+              {known(run.elapsed_seconds) &&
+                `Analyzed in ${figure(run.elapsed_seconds)} s. `}
+              Files stay inside <code>{rootLabel ?? "the launch root"}</code>.
+            </p>
+          )}
+          {run.source && (
+            <details className="more">
+              <summary>Source fingerprint</summary>
+              <p className="literal-line">
+                <code>{run.source.path}</code>
+              </p>
+              <p className="literal-line">
+                <code>{run.source.canonical_sha256}</code>
+              </p>
+            </details>
+          )}
+          <ErrorNotice message={error} />
+          <p className="link-row">
+            {run.status === "ready" && (
+              <>
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => exportFile("json")}
+                >
+                  Export JSON
+                </button>
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => exportFile("html")}
+                >
+                  Export HTML
+                </button>
+              </>
+            )}
+            {["ready", "failed"].includes(run.status) && (
+              <button type="button" className="link" onClick={unload}>
+                Unload run
+              </button>
+            )}
+          </p>
+        </section>
+      )}
+    </div>
+  );
+}
 export default function App() {
   const [credentials, setCredentials] = useState(() => ({
     token: initializeToken(),
@@ -37,7 +203,11 @@ function Investigation({ token }: { token: string }) {
     [runId, setRunId] = useState("");
   const [tab, setTab] = useState<Tab>("Events"),
     [picker, setPicker] = useState<"run" | "evidence" | null>(null),
-    [citation, setCitation] = useState<Citation | null>(null),
+    [citation, setCitation] = useState<{
+      value: Citation;
+      context: ReaderContext;
+    } | null>(null),
+    [seed, setSeed] = useState<CompareSeed | null>(null),
     [saved, setSaved] = useState<Evidence | null>(null);
   const [error, setError] = useState<string | null>(null),
     [initialLoading, setInitialLoading] = useState(true),
@@ -110,6 +280,27 @@ function Investigation({ token }: { token: string }) {
     };
   }, [runs]);
   const selected = runs.find((run) => run.id === runId);
+  const loadButton = useRef<HTMLButtonElement>(null),
+    hadRun = useRef(false);
+  // Unloading the last run removes the focused run menu.
+  useEffect(() => {
+    if (hadRun.current && !selected) loadButton.current?.focus();
+    hadRun.current = Boolean(selected);
+  }, [selected]);
+  const current = useRef({ tab, picker });
+  current.current = { tab, picker };
+  // Panels stay mounted, so a citation can resolve after the user moved on.
+  function openCitation(origin: Tab) {
+    return (value: Citation, context: ReaderContext) => {
+      if (current.current.tab === origin && !current.current.picker)
+        setCitation({ value, context });
+    };
+  }
+  function resetRunState() {
+    setCitation(null);
+    setSaved(null);
+    setSeed(null);
+  }
   function loaded(run: Run) {
     setRuns((current) => [
       ...current.filter((item) => item.id !== run.id),
@@ -117,117 +308,23 @@ function Investigation({ token }: { token: string }) {
     ]);
     setRunId(run.id);
     setTab("Events");
-    setCitation(null);
-    setSaved(null);
+    resetRunState();
   }
   async function unload() {
     if (!selected) return;
-    try {
-      await request(`/api/runs/${selected.id}`, { method: "DELETE" });
-      setRuns((current) => current.filter((item) => item.id !== selected.id));
-      setRunId(runs.find((item) => item.id !== selected.id)?.id ?? "");
-      setCitation(null);
-      setSaved(null);
-    } catch (error) {
-      setError(
-        error instanceof Error ? error.message : "Unable to unload run.",
-      );
-    }
+    await request(`/api/runs/${selected.id}`, { method: "DELETE" });
+    setRuns((current) => current.filter((item) => item.id !== selected.id));
+    setRunId(runs.find((item) => item.id !== selected.id)?.id ?? "");
+    resetRunState();
   }
   return (
     <>
-      <header className="app-header">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            rd
-          </span>
-          <div>
-            <h1>Rollout Diff</h1>
-            <p>Local investigation</p>
-          </div>
-        </div>
-        <div className="header-actions">
-          <label>
-            Loaded run
-            <select
-              value={runId}
-              onChange={(event) => {
-                setRunId(event.target.value);
-                setCitation(null);
-                setSaved(null);
-              }}
-              aria-label="Loaded run"
-            >
-              <option value="">Select a loaded run</option>
-              {runs.map((run) => (
-                <option key={run.id} value={run.id}>
-                  {run.run} · {run.status}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            className="primary"
-            onClick={() => setPicker("run")}
-            disabled={!session}
-          >
-            Load run
-          </button>
-        </div>
-      </header>
-      <main>
-        <div className="session-line">
-          <span>
-            Root <code>{session?.root_label ?? "Connecting…"}</code>
-          </span>
-          <span>Local analysis only</span>
-        </div>
-        {!token && (
-          <ErrorNotice message="No local session token. Open the URL printed by rollout investigate." />
-        )}
-        <ErrorNotice
-          message={error}
-          retry={() => setRevision((value) => value + 1)}
-        />
-        {initialLoading && (
-          <p className="loading" role="status">
-            Connecting to local investigation…
-          </p>
-        )}
-        {selected && (
-          <section className="run-strip" aria-label="Run summary">
-            <div>
-              <strong>{selected.run}</strong>
-              <Badge warn={selected.status === "failed"}>
-                {selected.status}
-              </Badge>
-              {selected.elapsed_seconds !== null &&
-                selected.elapsed_seconds !== undefined && (
-                  <span className="muted">
-                    {text(selected.elapsed_seconds)} s
-                  </span>
-                )}
-            </div>
-            {selected.counts && <Fields data={selected.counts} />}
-            <div className="run-actions">
-              {selected.source && (
-                <details>
-                  <summary>Source fingerprint</summary>
-                  <code>{selected.source.path}</code>
-                  <code className="fingerprint">
-                    {selected.source.canonical_sha256}
-                  </code>
-                </details>
-              )}
-              {["ready", "failed"].includes(selected.status) && (
-                <button onClick={unload}>Unload run</button>
-              )}
-            </div>
-          </section>
-        )}
+      <header className="masthead">
+        <span className="brand">Rollout Diff</span>
         <div className="tabs" role="tablist" aria-label="Investigation views">
-          {(["Events", "Compare", "Saved evidence"] as Tab[]).map((name) => (
+          {TABS.map((name) => (
             <button
+              type="button"
               key={name}
               id={`tab-${name.replaceAll(" ", "-")}`}
               role="tab"
@@ -235,11 +332,10 @@ function Investigation({ token }: { token: string }) {
               aria-controls="investigation-panel"
               tabIndex={tab === name ? 0 : -1}
               onKeyDown={(event) => {
-                const names: Tab[] = ["Events", "Compare", "Saved evidence"];
                 if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
                   const next =
-                    names[
-                      (names.indexOf(tab) +
+                    TABS[
+                      (TABS.indexOf(tab) +
                         (event.key === "ArrowRight" ? 1 : 2)) %
                         3
                     ];
@@ -258,72 +354,126 @@ function Investigation({ token }: { token: string }) {
             </button>
           ))}
         </div>
+        <div className="run-controls">
+          {selected && (
+            <RunMenu
+              run={selected}
+              runs={runs}
+              rootLabel={session?.root_label}
+              onSelect={(id) => {
+                setRunId(id);
+                resetRunState();
+              }}
+              onUnload={unload}
+            />
+          )}
+          <button
+            ref={loadButton}
+            type="button"
+            className="link"
+            onClick={() => setPicker("run")}
+            disabled={!session}
+          >
+            Load run
+          </button>
+        </div>
+      </header>
+      <main className="page">
+        {!token && (
+          <ErrorNotice message="No local session token. Open the URL printed by rollout investigate." />
+        )}
+        <ErrorNotice
+          message={error}
+          retry={() => setRevision((value) => value + 1)}
+        />
+        {initialLoading && (
+          <p className="loading" role="status">
+            Connecting to local investigation…
+          </p>
+        )}
         <div
           id="investigation-panel"
           role="tabpanel"
+          tabIndex={-1}
           aria-labelledby={`tab-${tab.replaceAll(" ", "-")}`}
         >
-          {tab === "Saved evidence" ? (
+          <div hidden={tab !== "Saved evidence"}>
             <EvidenceView value={saved} onOpen={() => setPicker("evidence")} />
-          ) : selected?.status === "ready" ? (
-            tab === "Events" ? (
-              <EventsView
-                key={selected.id}
-                run={selected}
-                onCitation={setCitation}
-              />
-            ) : (
-              <CompareView
-                key={selected.id}
-                run={selected}
-                runs={runs}
-                onCitation={setCitation}
-              />
-            )
-          ) : selected?.status === "failed" ? (
-            <div className="empty">
-              <h2>Run could not be loaded</h2>
+          </div>
+          {selected?.status === "ready" ? (
+            <>
+              <div hidden={tab !== "Events"}>
+                <EventsView
+                  key={selected.id}
+                  run={selected}
+                  onCitation={openCitation("Events")}
+                  onCompare={(windows) => {
+                    setSeed(windows);
+                    setTab("Compare");
+                  }}
+                />
+              </div>
+              <div hidden={tab !== "Compare"}>
+                <CompareView
+                  key={selected.id}
+                  run={selected}
+                  runs={runs}
+                  seed={seed}
+                  onCitation={openCitation("Compare")}
+                />
+              </div>
+            </>
+          ) : tab === "Saved evidence" ? null : selected?.status === "failed" ? (
+            <div className="blank">
+              <h1 className="headline">Run could not be loaded</h1>
               <ErrorNotice message={selected.error ?? "Analysis failed."} />
-              <button onClick={() => setPicker("run")}>
-                Choose another input
-              </button>
+              <p className="link-row">
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => setPicker("run")}
+                >
+                  Choose another input
+                </button>
+              </p>
             </div>
           ) : selected ? (
-            <div className="empty" role="status">
-              <div className="spinner" />
-              <h2>
-                {selected.status === "queued"
-                  ? "Run queued"
-                  : selected.status === "loading"
-                    ? "Reading source files"
-                    : "Analyzing rollout evidence"}
-              </h2>
-              <p>
-                The local worker is processing {selected.run}. This view updates
-                automatically.
+            <div className="blank" role="status">
+              <h1 className="headline">
+                {STAGES[selected.status] ?? selected.status}
+              </h1>
+              <p className="dek">
+                The local worker is processing <code>{selected.run}</code>. This
+                view updates automatically.
               </p>
+              <div className="progress" aria-hidden="true">
+                <i />
+              </div>
             </div>
           ) : !initialLoading && session ? (
-            <div className="empty welcome">
-              <h2>Load a rollout run to begin</h2>
-              <p>
-                Browse ranked events, follow feature changes and inspect exact
-                source responses.
+            <div className="blank">
+              <h1 className="headline">Load a rollout run to begin</h1>
+              <p className="dek">
+                Browse ranked events, follow feature changes and read exact
+                source responses. Analysis stays on this machine, and files stay
+                inside <code>{session.root_label}</code>.
               </p>
-              <button className="primary" onClick={() => setPicker("run")}>
-                Choose local input
-              </button>
-              <p className="muted">
-                TRL parquet or verl JSONL · files stay within the selected root
+              <p className="link-row">
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={() => setPicker("run")}
+                >
+                  Choose local input
+                </button>
+              </p>
+              <p className="section-note">
+                TRL parquet, or verl JSONL files and directories.
               </p>
             </div>
           ) : null}
         </div>
       </main>
-      <footer>
-        Rollout Diff · Evidence for investigation. Descriptive indicators do not
-        establish mechanism.
-      </footer>
       {picker && (
         <FilePicker
           mode={picker}
@@ -332,9 +482,13 @@ function Investigation({ token }: { token: string }) {
           onRun={loaded}
           onEvidence={setSaved}
         />
-      )}{" "}
+      )}
       {citation && (
-        <ResponseDrawer value={citation} onClose={() => setCitation(null)} />
+        <ResponseDrawer
+          value={citation.value}
+          context={citation.context}
+          onClose={() => setCitation(null)}
+        />
       )}
     </>
   );

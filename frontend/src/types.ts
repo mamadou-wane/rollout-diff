@@ -36,18 +36,35 @@ export interface Event {
   event_id?: string;
   representative_feature: string;
   ranking_status: string;
-  onset_start?: Step | null;
-  onset_end?: Step | null;
+  onset_start: Step;
+  onset_end: Step;
   onset_step: Step | null;
   alert_step: Step | null;
   n_members: number;
   ranking: Row;
   members: Member[];
 }
+export interface Headline {
+  before: number;
+  after: number;
+  n_prompts: Step;
+}
 export interface EventDetail {
   event: Event;
   evidence: Row[];
   prompt_shifts: Row[];
+  headlines?: Record<string, Headline>;
+}
+export interface CompareSeed {
+  feature: string;
+  a: [string, string];
+  b: [string, string];
+}
+export interface ReaderContext {
+  back: string;
+  feature: string;
+  sampleIds: string[];
+  load: (sampleId: string) => Promise<Citation>;
 }
 export interface Point {
   step: Step;
@@ -62,10 +79,12 @@ export interface Series {
   tier: string;
   kind: string;
   points: Point[];
-  evidence: Row | null;
+  evidence: Row;
   persistence: Row[];
   prompt_values: Row[];
   prompt_shifts: Row[];
+  headline?: Headline | null;
+  direction?: string | null;
 }
 export interface Citation {
   citation: Row;

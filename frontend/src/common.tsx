@@ -9,6 +9,62 @@ export function text(value: unknown): string {
       : String(Number(value.toPrecision(4)));
   return String(value);
 }
+export function known(value: unknown) {
+  return value !== null && value !== undefined;
+}
+export function plural(count: unknown, noun: string) {
+  return `${text(count)} ${noun}${String(count) === "1" ? "" : "s"}`;
+}
+/** Equal up to floating-point noise, with the tolerances of comparison.py. */
+export function sameValue(a: number, b: number) {
+  return Math.abs(a - b) <= 1e-12 * Math.max(1, Math.abs(a), Math.abs(b));
+}
+export function figure(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return text(value);
+  if (Math.abs(value) >= 100) return String(Math.round(value));
+  // Rounding must not turn a prevalence below one into exactly one.
+  let digits = 3;
+  while (
+    Number(value.toPrecision(digits)) === 1 &&
+    !sameValue(value, 1) &&
+    digits < 15
+  )
+    digits++;
+  return String(Number(value.toPrecision(digits)));
+}
+/** Round two values for display, keeping unequal values visibly distinct. */
+export function figures(a: number, b: number): [string, string] {
+  if (sameValue(a, b)) return [figure(a), figure(a)];
+  if (figure(a) !== figure(b)) return [figure(a), figure(b)];
+  let digits = 4;
+  while (Number(a.toPrecision(digits)) === Number(b.toPrecision(digits)))
+    digits++;
+  return [
+    String(Number(a.toPrecision(digits))),
+    String(Number(b.toPrecision(digits))),
+  ];
+}
+export const PROMPT_SHIFT_COLUMNS = [
+  "descriptor",
+  "statistic",
+  "before",
+  "after",
+  "delta",
+  "distance",
+  "n_before",
+  "n_after",
+  "missing_before",
+  "missing_after",
+];
+export function runCounts(counts: Row) {
+  const count = (key: string) => text(counts[key]);
+  return `${count("rollouts")} rollouts across ${count("observed_steps")} observed steps and ${count("prompts")} prompts. ${count("sequential_alerts")} sequential alerts, grouped into ${count("events")} events: ${count("behavioral_events")} behavioral, ${count("contextual_events")} contextual, ${count("other_events")} other.`;
+}
+export function signed(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return text(value);
+  const magnitude = text(Math.abs(value));
+  return value > 0 ? `+${magnitude}` : value < 0 ? `−${magnitude}` : magnitude;
+}
 export function label(value: string) {
   return value.replaceAll("_", " ");
 }
@@ -28,20 +84,15 @@ export function ErrorNotice({
   retry?: () => void;
 }) {
   return message ? (
-    <div role="alert" className="notice error">
+    <div role="alert" className="notice">
       {message}
-      {retry && <button onClick={retry}>Retry</button>}
+      {retry && (
+        <button type="button" className="link" onClick={retry}>
+          Retry
+        </button>
+      )}
     </div>
   ) : null;
-}
-export function Badge({
-  children,
-  warn = false,
-}: {
-  children: ReactNode;
-  warn?: boolean;
-}) {
-  return <span className={`badge ${warn ? "warning" : ""}`}>{children}</span>;
 }
 export function Fields({ data, fields }: { data: Row; fields?: string[] }) {
   const keys =
@@ -103,12 +154,10 @@ export function Modal({
   title,
   onClose,
   children,
-  drawer = false,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
-  drawer?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
@@ -132,15 +181,16 @@ export function Modal({
           return;
         }
         const first = elements[0],
-          last = elements[elements.length - 1];
+          last = elements[elements.length - 1],
+          active = document.activeElement,
+          outside = !ref.current?.contains(active);
         if (
           event.shiftKey &&
-          (document.activeElement === first ||
-            document.activeElement === ref.current)
+          (outside || active === first || active === ref.current)
         ) {
           event.preventDefault();
           last.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
+        } else if (!event.shiftKey && (outside || active === last)) {
           event.preventDefault();
           first.focus();
         }
@@ -151,30 +201,23 @@ export function Modal({
     return () => {
       document.removeEventListener("keydown", onKey);
       document.body.classList.remove("modal-open");
-      previous?.focus();
+      // A trigger that unmounted or was disabled cannot take focus back.
+      (previous?.isConnected && previous !== document.body
+        ? previous
+        : document.querySelector<HTMLElement>('[role="tabpanel"]')
+      )?.focus();
     };
   }, []);
   return (
-    <div
-      className="scrim"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
+    <div className="scrim">
       <div
         ref={ref}
-        className={`modal ${drawer ? "drawer" : ""}`}
+        className="modal"
         role="dialog"
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
       >
-        <div className="modal-heading">
-          <h2>{title}</h2>
-          <button onClick={onClose} aria-label={`Close ${title.toLowerCase()}`}>
-            Close
-          </button>
-        </div>
         {children}
       </div>
     </div>

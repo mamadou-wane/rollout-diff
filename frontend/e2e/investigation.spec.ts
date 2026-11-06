@@ -61,20 +61,20 @@ async function load(page: Page, directory: string, name: string) {
   await page.getByLabel('Run name', { exact: true }).fill(name);
   await page.getByLabel('Input format').selectOption('verl');
   await page.getByRole('button', { name: 'Load selected run', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Unload run', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: new RegExp(`^Run ${name}, (ready|failed)`) })).toBeVisible();
 }
 
 test('load, two-click citation, compare, and saved replay use the real local application', async ({ page, session }, testInfo) => {
   const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
   await page.goto(session.url);
-  await expect(page.getByRole('heading', { name: 'Rollout Diff', exact: true })).toBeVisible();
+  await expect(page.getByRole('banner').getByText('Rollout Diff', { exact: true })).toBeVisible();
   await load(page, 'run-a', 'r');
   const event = page.getByRole('button', { name: /^Event 1:/ });
   await expect(event).toBeVisible();
   let clicks = 0;
   await event.click(); clicks++;
   await expect(page.getByRole('img', { name: /Feature mean and standard error/ })).toBeVisible();
-  await page.getByRole('button', { name: /^Inspect / }).first().click(); clicks++;
+  await page.getByRole('button', { name: /^Read response / }).first().click(); clicks++;
   const response = page.getByRole('dialog', { name: 'Original response' });
   await expect(response).toBeVisible();
   await expect(response.locator('pre.response').first()).toContainText('<img src=x');
@@ -87,19 +87,19 @@ test('load, two-click citation, compare, and saved replay use the real local app
   await page.getByLabel('A start').fill('1'); await page.getByLabel('A end').fill('15');
   await page.getByLabel('B start').fill('16'); await page.getByLabel('B end').fill('24');
   await page.getByRole('button', { name: 'Compare windows', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Comparison evidence' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'What changed' })).toBeVisible();
   await page.getByLabel('Search comparison features').fill('def:solve');
   await page.getByRole('button', { name: 'def:solve', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Shared-prompt estimate' })).toBeVisible();
-  await page.getByRole('button', { name: /^Inspect / }).first().click();
+  await page.getByRole('button', { name: /^Read response / }).first().click();
   await expect(page.getByRole('dialog', { name: 'Original response' })).toBeVisible();
   await page.getByRole('dialog').getByRole('button', { name: 'Close' }).click();
   await page.getByRole('tab', { name: 'Saved evidence' }).click();
   await page.getByRole('button', { name: 'Open saved evidence', exact: true }).click();
   await page.getByRole('button', { name: 'Select saved-replay.json', exact: true }).click();
   await page.getByRole('button', { name: 'Read selected evidence', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Historical claim', exact: true })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Saved protected task result', exact: true })).toBeVisible();
+  await expect(page.getByRole('rowheader', { name: 'Historical claim', exact: true })).toBeVisible();
+  await expect(page.getByRole('rowheader', { name: 'Saved protected task result', exact: true })).toBeVisible();
   await expect(page.getByText('Mechanism unresolved.', { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath('saved-evidence.png'), fullPage: true });
@@ -112,11 +112,11 @@ test('two dumps preserve independent sources and empty event results', async ({ 
   await page.getByLabel('Comparison run').selectOption({ label: 'r' });
   for (const [label, value] of [['A start','1'],['A end','24'],['B start','1'],['B end','24']]) await page.getByLabel(label).fill(value);
   await page.getByRole('button', { name: 'Compare windows', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Comparison evidence' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'What changed' })).toBeVisible();
   await page.getByLabel('Search comparison features').fill('def:solve');
   await page.getByRole('button', { name: 'def:solve', exact: true }).click();
-  await page.getByRole('button', { name: /^Inspect / }).first().click();
-  await expect(page.getByRole('dialog').getByText('r', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: /^Read response / }).first().click();
+  await expect(page.getByRole('dialog').getByRole('region', { name: 'Response with the feature' })).toContainText('run r, side B');
 });
 
 test('mobile loading errors and missing authorization remain explicit', async ({ page, session }, testInfo) => {
@@ -136,6 +136,12 @@ test('mobile loading errors and missing authorization remain explicit', async ({
   await expect(page.getByRole('img', { name: /Feature mean and standard error/ })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('mobile-event.png'), fullPage: true });
+  await page.getByRole('button', { name: /^Run r,/ }).click();
+  const unload = await page.getByRole('button', { name: 'Unload run', exact: true }).boundingBox();
+  expect(unload!.x).toBeGreaterThanOrEqual(0);
+  expect(unload!.x + unload!.width).toBeLessThanOrEqual(390);
+  await page.getByRole('button', { name: 'Unload run', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Load a rollout run to begin' })).toBeVisible();
 });
 
 
@@ -149,6 +155,7 @@ test.describe('a dump used as the launch root', () => {
     await page.getByLabel('Input format').selectOption('verl');
     await page.getByRole('button', { name: 'Load selected run', exact: true }).click();
     await expect(page.getByRole('button', { name: /^Event 1:/ })).toBeVisible();
+    await page.getByRole('button', { name: /^Run root-run,/ }).click();
     await expect(page.getByRole('region', { name: 'Run summary' })).toContainText('288');
   });
 });
